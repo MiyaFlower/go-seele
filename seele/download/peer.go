@@ -17,7 +17,7 @@ import (
 	"github.com/seeleteam/go-seele/p2p"
 )
 
-// This timeout should not be happened, but we need to handle it in case of such errors.
+// MsgWaitTimeout this timeout should not be happened, but we need to handle it in case of such errors.
 const MsgWaitTimeout = time.Second * 120
 
 var (
@@ -25,17 +25,19 @@ var (
 	errPeerQuit        = errors.New("Peer quit")
 )
 
+// Peer define some interfaces that request peer data
 type Peer interface {
 	Head() (common.Hash, *big.Int)
 	RequestHeadersByHashOrNumber(magic uint32, origin common.Hash, num uint64, amount int, reverse bool) error
 	RequestBlocksByHashOrNumber(magic uint32, origin common.Hash, num uint64, amount int) error
+	GetPeerRequestInfo() (uint32, common.Hash, uint64, int)
 }
 
 type peerConn struct {
 	peerID         string
 	peer           Peer
-	waitingMsgMap  map[uint16]chan *p2p.Message //
-	lockForWaiting sync.RWMutex                 //
+	waitingMsgMap  map[uint16]chan *p2p.Message
+	lockForWaiting sync.RWMutex
 
 	log    *log.SeeleLog
 	quitCh chan struct{}
@@ -76,7 +78,7 @@ Again:
 				goto Again
 			}
 			if reqMsg.Magic != magic {
-				p.log.Debug("Downloader.waitMsg  BlockHeadersMsg MAGIC_NOT_MATCH msg=%s pid=%s", CodeToStr(msgCode), p.peerID)
+				p.log.Debug("Downloader.waitMsg  BlockHeadersMsg MAGIC_NOT_MATCH msg=%s, magic=%d, pid=%s", CodeToStr(msgCode), magic, p.peerID)
 				goto Again
 			}
 			ret = reqMsg.Headers
@@ -92,14 +94,14 @@ Again:
 			ret = reqMsg.Blocks
 		}
 	case <-timeout.C:
-		err = fmt.Errorf("wait for msg %s timeout", CodeToStr(msgCode))
+		err = fmt.Errorf("Download.peerconn wait for msg %s timeout.magic= %d ip= %s", CodeToStr(msgCode), magic, p.peerID)
 	}
 
 	p.lockForWaiting.Lock()
 	delete(p.waitingMsgMap, msgCode)
 	p.lockForWaiting.Unlock()
 	close(rcvCh)
-	return
+	return ret, err
 }
 
 func (p *peerConn) deliverMsg(msgCode uint16, msg *p2p.Message) {
@@ -108,6 +110,7 @@ func (p *peerConn) deliverMsg(msgCode uint16, msg *p2p.Message) {
 			p.log.Info("peerConn.deliverMsg PANIC msg=%s pid=%s", CodeToStr(msgCode), p.peerID)
 		}
 	}()
+
 	p.lockForWaiting.Lock()
 	ch, ok := p.waitingMsgMap[msgCode]
 	p.lockForWaiting.Unlock()

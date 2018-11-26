@@ -15,13 +15,14 @@ import (
 
 // Context provides information that required in system contract.
 type Context struct {
-	tx      *types.Transaction
-	statedb *state.Statedb
+	tx          *types.Transaction
+	statedb     *state.Statedb
+	BlockHeader *types.BlockHeader
 }
 
 // NewContext creates a system contract context.
-func NewContext(tx *types.Transaction, statedb *state.Statedb) *Context {
-	return &Context{tx, statedb}
+func NewContext(tx *types.Transaction, statedb *state.Statedb, BlockHeader *types.BlockHeader) *Context {
+	return &Context{tx, statedb, BlockHeader}
 }
 
 // Contract is the basic interface for native Go contracts in Seele.
@@ -35,15 +36,28 @@ const (
 )
 
 var (
-	errInvalidCommand = errors.New("invalid command")
-	errExists         = errors.New("already exists")
+	errInvalidCommand      = errors.New("invalid command")
+	errExists              = errors.New("already exists")
+	errInvalidSubChainInfo = errors.New("invalid SubChainInfo")
 
-	domainNameContractAddress = common.BytesToAddress([]byte{1, 1})
-	subChainContractAddress   = common.BytesToAddress([]byte{1, 2})
+	// DomainNameContractAddress domain contract address
+	DomainNameContractAddress = common.BytesToAddress([]byte{1, 1})
+	// SubChainContractAddress subchain contract address
+	SubChainContractAddress = common.BytesToAddress([]byte{1, 2})
+	// HashTimeLockContractAddress HTLC contract address
+	HashTimeLockContractAddress = common.BytesToAddress([]byte{1, 3})
+	// MasternodeContractAddress masternode contract address
+	MasternodeContractAddress = common.BytesToAddress([]byte{1, 4})
+	// BTCRelayContractAddress btc-relay contract address
+	BTCRelayContractAddress = common.BytesToAddress([]byte{1, 5})
 
+	// Contracts are system contracts
 	contracts = map[common.Address]Contract{
-		domainNameContractAddress: &contract{domainNameCommands},
-		subChainContractAddress:   &contract{subChainCommands},
+		DomainNameContractAddress:   &contract{domainNameCommands},
+		SubChainContractAddress:     &contract{subChainCommands},
+		HashTimeLockContractAddress: &contract{htlcCommands},
+		MasternodeContractAddress:   &contract{masternodeCommands},
+		BTCRelayContractAddress:     &contract{brCommands},
 	}
 )
 
@@ -80,4 +94,9 @@ func (c *contract) Run(input []byte, context *Context) ([]byte, error) {
 	}
 
 	return nil, errInvalidCommand
+}
+
+// GetContractByAddress get system contract by the address
+func GetContractByAddress(address common.Address) Contract {
+	return contracts[address]
 }

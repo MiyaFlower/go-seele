@@ -33,8 +33,16 @@ type Config struct {
 	// The configuration of websocket rpc service
 	WSServerConfig WSServerConfig
 
+	// The configuration of ipc rpc service
+	IpcConfig IpcConfig
+
 	// metrics config info
 	MetricsConfig *metrics.Config
+}
+
+// IpcConfig config for ipc rpc service
+type IpcConfig struct {
+	PipeName string `json:"name"`
 }
 
 // BasicConfig config for Node
@@ -53,6 +61,9 @@ type BasicConfig struct {
 
 	// coinbase used by the miner
 	Coinbase string `json:"coinbase"`
+
+	// MinerAlgorithm miner algorithm
+	MinerAlgorithm string `json:"algorithm"`
 }
 
 // HTTPServer config for http server
@@ -84,4 +95,14 @@ type SeeleConfig struct {
 	Coinbase common.Address
 
 	GenesisConfig core.GenesisInfo
+}
+
+func (conf *Config) Clone() *Config {
+	cloned := *conf
+	if conf.MetricsConfig != nil {
+		temp := *conf.MetricsConfig
+		cloned.MetricsConfig = &temp
+	}
+
+	return &cloned
 }

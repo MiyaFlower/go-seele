@@ -7,30 +7,40 @@ package system
 
 import (
 	"errors"
+	"regexp"
+	"strings"
 
 	"github.com/seeleteam/go-seele/common"
 )
 
 const (
-	gasCreateDomainName  = uint64(50000)  // gas used to create a domain name
-	gasDomainNameCreator = uint64(100000) // gas used to query the creator of given domain name
+	// CmdCreateDomainName create a domain
+	CmdCreateDomainName byte = iota
+	// CmdGetDomainNameOwner query the registrar of specified domain name
+	CmdGetDomainNameOwner
+)
 
-	cmdCreateDomainName  = byte(0) // create a domain name
-	cmdDomainNameCreator = byte(1) // query the creator of specified domain name
+const (
+	// gas used to create a domain name
+	gasCreateDomainName = uint64(50000)
+	// gas used to get the owner of given domain
+	gasGetDomainNameOwner = uint64(100000)
 )
 
 var (
 	errNameEmpty   = errors.New("name is empty")
 	errNameTooLong = errors.New("name too long")
+	errInvalidName = errors.New("invalid name, only numbers, letters, and dash lines are allowed")
 
 	maxDomainNameLength = len(common.EmptyHash)
 
 	domainNameCommands = map[byte]*cmdInfo{
-		cmdCreateDomainName:  &cmdInfo{gasCreateDomainName, createDomainName},
-		cmdDomainNameCreator: &cmdInfo{gasDomainNameCreator, domainNameCreator},
+		CmdCreateDomainName:   &cmdInfo{gasCreateDomainName, createDomainName},
+		CmdGetDomainNameOwner: &cmdInfo{gasGetDomainNameOwner, getDomainNameOwner},
 	}
 )
 
+// createDomainName create a domain name
 func createDomainName(domainName []byte, context *Context) ([]byte, error) {
 	key, err := domainNameToKey(domainName)
 	if err != nil {
@@ -38,39 +48,65 @@ func createDomainName(domainName []byte, context *Context) ([]byte, error) {
 	}
 
 	// create account in statedb for the first time.
-	context.statedb.CreateAccount(domainNameContractAddress)
+	context.statedb.CreateAccount(DomainNameContractAddress)
 
 	// ensure not exist
-	if value := context.statedb.GetData(domainNameContractAddress, key); len(value) > 0 {
+	if value := context.statedb.GetData(DomainNameContractAddress, key); len(value) > 0 {
 		return nil, errExists
 	}
 
 	// save in statedb
 	value := context.tx.Data.From.Bytes()
-	context.statedb.SetData(domainNameContractAddress, key, value)
+	context.statedb.SetData(DomainNameContractAddress, key, value)
 
-	return nil, nil
+	return value, nil
 }
 
-func domainNameToKey(domainName []byte) (common.Hash, error) {
-	nameLen := len(domainName)
-
-	if nameLen == 0 {
-		return common.EmptyHash, errNameEmpty
-	}
-
-	if nameLen > maxDomainNameLength {
-		return common.EmptyHash, errNameTooLong
-	}
-
-	return common.BytesToHash(domainName), nil
-}
-
-func domainNameCreator(domainName []byte, context *Context) ([]byte, error) {
+// getDomainNameOwner get domain name owner
+func getDomainNameOwner(domainName []byte, context *Context) ([]byte, error) {
 	key, err := domainNameToKey(domainName)
 	if err != nil {
 		return nil, err
 	}
 
-	return context.statedb.GetData(domainNameContractAddress, key), nil
+	owner := context.statedb.GetData(DomainNameContractAddress, key)
+	if len(owner) == 0 {
+		return nil, errNotFound
+	}
+
+	return owner, nil
+}
+
+// ValidateDomainName validate domain name
+func ValidateDomainName(domainName []byte) error {
+	nameLen := len(domainName)
+
+	if nameLen == 0 {
+		return errNameEmpty
+	}
+
+	if nameLen > maxDomainNameLength {
+		return errNameTooLong
+	}
+
+	ok, err := regexp.Match(`^[a-zA-Z0-9\-]+$`, domainName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errInvalidName
+	}
+	return nil
+}
+
+// domainNameToKey convert domain name to hash and uppercase to lowercase
+func domainNameToKey(domainName []byte) (common.Hash, error) {
+	lowerDomainName := []byte(strings.ToLower(string(domainName)))
+
+	err := ValidateDomainName(lowerDomainName)
+	if err != nil {
+		return common.EmptyHash, err
+	}
+
+	return common.BytesToHash(domainName), nil
 }

@@ -97,7 +97,7 @@ func (r *rpcNode) ToNode() *Node {
 	return NewNode(r.SelfID, r.IP, int(r.UDPPort), r.Shard)
 }
 
-func ConvertToRpcNode(n *Node) *rpcNode {
+func convertToRPCNode(n *Node) *rpcNode {
 	return &rpcNode{
 		SelfID:  n.ID,
 		IP:      n.IP,
@@ -106,8 +106,8 @@ func ConvertToRpcNode(n *Node) *rpcNode {
 	}
 }
 
-func byteToMsgType(byte byte) msgType {
-	return msgType(uint8(byte))
+func byteToMsgType(data byte) msgType {
+	return msgType(data)
 }
 
 func msgTypeToByte(t msgType) byte {
@@ -124,7 +124,7 @@ func generateBuff(code msgType, encoding []byte) []byte {
 func (m *ping) handle(t *udp, from *net.UDPAddr) {
 	node := NewNodeWithAddr(m.SelfID, from, m.SelfShard)
 	t.addNode(node, false)
-	t.timeoutNodesCount.Set(m.SelfID.ToHex(), 0)
+	t.timeoutNodesCount.Set(m.SelfID.Hex(), 0)
 
 	// response with pong
 	if m.Version != discoveryProtocolVersion {
@@ -152,7 +152,7 @@ func (m *ping) send(t *udp) {
 			r := resp.(*pong)
 			n := NewNodeWithAddr(r.SelfID, addr, r.SelfShard)
 			t.addNode(n, true)
-			t.timeoutNodesCount.Set(n.ID.ToHex(), 0)
+			t.timeoutNodesCount.Set(n.ID.Hex(), 0)
 
 			t.log.Debug("received [pongMsg] from: %s", n)
 
@@ -169,7 +169,7 @@ func (m *ping) send(t *udp) {
 
 // handle response find node request
 func (m *findNode) handle(t *udp, from *net.UDPAddr) {
-	t.log.Debug("received request [findNodeMsg] from: %s, id: %s", from, m.SelfID.ToHex())
+	t.log.Debug("received request [findNodeMsg] from: %s, id: %s", from, m.SelfID.Hex())
 
 	nodes := t.table.findNodeWithTarget(crypto.HashBytes(m.QueryID.Bytes()))
 
@@ -179,7 +179,7 @@ func (m *findNode) handle(t *udp, from *net.UDPAddr) {
 
 	rpcs := make([]*rpcNode, len(nodes))
 	for index, n := range nodes {
-		rpcs[index] = ConvertToRpcNode(n)
+		rpcs[index] = convertToRPCNode(n)
 	}
 
 	response := &neighbors{
@@ -201,13 +201,13 @@ func (m *findNode) send(t *udp) {
 		callback: func(resp interface{}, addr *net.UDPAddr) (done bool) {
 			r := resp.(*neighbors)
 
-			t.log.Debug("received [neighborsMsg] from: %s with %d nodes", r.SelfID.ToHex(), len(r.Nodes))
+			t.log.Debug("received [neighborsMsg] from: %s with %d nodes", r.SelfID.Hex(), len(r.Nodes))
 			if r.Nodes == nil || len(r.Nodes) == 0 {
 				return true
 			}
 
 			for _, n := range r.Nodes {
-				t.log.Debug("received node: %s", n.SelfID.ToHex())
+				t.log.Debug("received node: %s", n.SelfID.Hex())
 
 				node := n.ToNode()
 				t.addNode(node, false)
@@ -302,7 +302,7 @@ func (m *findShardNode) handle(t *udp, from *net.UDPAddr) {
 
 	rpcNodes := make([]*rpcNode, len(nodes))
 	for i := 0; i < len(nodes); i++ {
-		rpcNodes[i] = ConvertToRpcNode(nodes[i])
+		rpcNodes[i] = convertToRPCNode(nodes[i])
 	}
 
 	response := &shardNode{

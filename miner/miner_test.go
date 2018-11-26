@@ -10,16 +10,18 @@ import (
 	"io/ioutil"
 	"math/big"
 	"os"
-	"runtime"
 	"testing"
 
-	"github.com/magiconair/properties/assert"
 	"github.com/seeleteam/go-seele/common"
+	"github.com/seeleteam/go-seele/consensus/factory"
+	"github.com/seeleteam/go-seele/consensus/pow"
 	"github.com/seeleteam/go-seele/core"
 	"github.com/seeleteam/go-seele/core/store"
 	"github.com/seeleteam/go-seele/crypto"
 	"github.com/seeleteam/go-seele/database"
 	"github.com/seeleteam/go-seele/database/leveldb"
+	"github.com/stretchr/testify/assert"
+	"github.com/seeleteam/go-seele/core/types"
 )
 
 var defaultMinerAddr = common.BytesToAddress([]byte{1})
@@ -32,23 +34,7 @@ func Test_NewMiner(t *testing.T) {
 	checkMinerMembers(miner, defaultMinerAddr, seele, t)
 
 	assert.Equal(t, miner.GetCoinbase(), defaultMinerAddr)
-	assert.Equal(t, miner.GetThreads(), 1)
 	assert.Equal(t, miner.IsMining(), false)
-}
-
-func Test_SetThreads(t *testing.T) {
-	miner := createMiner()
-
-	assert.Equal(t, miner.GetThreads(), 1)
-
-	miner.SetThreads(1)
-	assert.Equal(t, miner.GetThreads(), 1)
-
-	miner.SetThreads(2)
-	assert.Equal(t, miner.GetThreads(), 2)
-
-	miner.SetThreads(0)
-	assert.Equal(t, miner.GetThreads(), runtime.NumCPU())
 }
 
 func Test_SetCoinbase(t *testing.T) {
@@ -82,19 +68,17 @@ func Test_Start(t *testing.T) {
 
 	miner.canStart = 1
 	err = miner.Start()
-	defer miner.Close()
 	assert.Equal(t, err, nil)
 
 	assert.Equal(t, miner.stopped, int32(0))
 	assert.Equal(t, miner.mining, int32(1))
-	assert.Equal(t, miner.Hashrate(), float64(0))
 	miner.Stop()
 	assert.Equal(t, miner.stopped, int32(1))
 	assert.Equal(t, miner.mining, int32(0))
 }
 
 func createMiner() *Miner {
-	return NewMiner(defaultMinerAddr, seele)
+	return NewMiner(defaultMinerAddr, seele, nil, factory.MustGetConsensusEngine(common.Sha256Algorithm))
 }
 
 func checkMinerMembers(miner *Miner, addr common.Address, seele SeeleBackend, t *testing.T) {
@@ -106,7 +90,6 @@ func checkMinerMembers(miner *Miner, addr common.Address, seele SeeleBackend, t 
 	assert.Equal(t, miner.seele, seele)
 	assert.Equal(t, miner.isFirstDownloader, int32(1))
 	assert.Equal(t, miner.isFirstBlockPrepared, int32(0))
-	assert.Equal(t, miner.threads, 1)
 	assert.Equal(t, miner.isFirstDownloader, int32(1))
 }
 
@@ -122,7 +105,7 @@ func NewTestSeeleBackend(db database.Database) *TestSeeleBackend {
 
 	seeleBeckend.txPool = newTestPool(core.DefaultTxPoolConfig(), db)
 	seeleBeckend.blockchain = newTestBlockchain(db)
-	seeleBeckend.debtPool = core.NewDebtPool()
+	seeleBeckend.debtPool = core.NewDebtPool(seeleBeckend.blockchain, nil)
 
 	return seeleBeckend
 }
@@ -147,7 +130,7 @@ func newTestBlockchain(db database.Database) *core.Blockchain {
 		panic(err)
 	}
 
-	bc, err := core.NewBlockchain(bcStore, db, "")
+	bc, err := core.NewBlockchain(bcStore, db, "", pow.NewEngine(1), nil)
 	if err != nil {
 		panic(err)
 	}
@@ -179,7 +162,7 @@ func newTestGenesis() *core.Genesis {
 		accounts[account.addr] = account.amount
 	}
 
-	return core.GetGenesis(core.GenesisInfo{accounts, 1, 0})
+	return core.GetGenesis(core.NewGenesisInfo(accounts, 1, 0, big.NewInt(0), types.PowConsensus, nil))
 }
 
 var testGenesisAccounts = []*testAccount{
@@ -211,10 +194,7 @@ type testAccount struct {
 
 func newTestPool(config *core.TransactionPoolConfig, db database.Database) *core.TransactionPool {
 	chain := newTestBlockchain(db)
-	txPool, err := core.NewTransactionPool(*config, chain)
-	if err != nil {
-		panic(err)
-	}
+	txPool := core.NewTransactionPool(*config, chain)
 
 	return txPool
 }

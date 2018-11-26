@@ -18,6 +18,7 @@ import (
 	"github.com/seeleteam/go-seele/common"
 	"github.com/seeleteam/go-seele/common/hexutil"
 	"github.com/seeleteam/go-seele/crypto/secp256k1"
+	"github.com/seeleteam/go-seele/crypto/sha3"
 )
 
 const (
@@ -52,7 +53,16 @@ func ToECDSAPub(pub []byte) *ecdsa.PublicKey {
 
 // PubkeyToString returns the string of the given public key, with prefix 0x
 func PubkeyToString(pub *ecdsa.PublicKey) string {
-	return GetAddress(pub).ToHex()
+	return GetAddress(pub).Hex()
+}
+
+// Keccak512 calculates and returns the Keccak512 hash of the input data.
+func Keccak512(data ...[]byte) []byte {
+	d := sha3.NewKeccak512()
+	for _, b := range data {
+		d.Write(b)
+	}
+	return d.Sum(nil)
 }
 
 // FromECDSAPub marshals and returns the byte array of the specified ECDSA public key.
@@ -128,6 +138,11 @@ func GetAddress(key *ecdsa.PublicKey) *common.Address {
 	return &addr
 }
 
+// PubkeyToAddress add this method for istanbul BFT integration
+func PubkeyToAddress(key ecdsa.PublicKey) common.Address  {
+	return *GetAddress(&key)
+}
+
 // GenerateRandomAddress generates and returns a random address.
 func GenerateRandomAddress() (*common.Address, error) {
 	addr, _, err := GenerateKeyPair()
@@ -176,5 +191,13 @@ func MustGenerateShardKeyPair(shard uint) (*common.Address, *ecdsa.PrivateKey) {
 // address and nonce. Note, the new created contract address and the account
 // address are in the same shard.
 func CreateAddress(addr common.Address, nonce uint64) common.Address {
-	return addr.CreateContractAddress(nonce, MustHash)
+	hash := MustHash([]interface{}{addr, nonce})
+	return addr.CreateContractAddressWithHash(hash)
+}
+
+// CreateAddress2 creates an ethereum address given the address bytes, initial
+// contract code hash and a salt.
+func CreateAddress2(b common.Address, salt common.Hash, inithash []byte) common.Address {
+	hash := Keccak256Hash([]byte{0xff}, b.Bytes(), salt.Bytes(), inithash)
+	return b.CreateContractAddressWithHash(hash)
 }

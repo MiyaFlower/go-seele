@@ -8,10 +8,15 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/seeleteam/go-seele/common"
+	"github.com/seeleteam/go-seele/consensus/factory"
+	"github.com/seeleteam/go-seele/light"
 	"github.com/seeleteam/go-seele/log"
 	"github.com/seeleteam/go-seele/log/comm"
 	"github.com/seeleteam/go-seele/metrics"
@@ -19,14 +24,23 @@ import (
 	"github.com/seeleteam/go-seele/monitor"
 	"github.com/seeleteam/go-seele/node"
 	"github.com/seeleteam/go-seele/seele"
+	"github.com/seeleteam/go-seele/seele/lightclients"
 	"github.com/spf13/cobra"
 )
 
-var seeleNodeConfigFile string
-var miner string
-var metricsEnableFlag bool
-var accountsConfig string
-var threads uint
+var (
+	seeleNodeConfigFile string
+	miner               string
+	metricsEnableFlag   bool
+	accountsConfig      string
+	threads             int
+
+	// default is full node
+	lightNode bool
+
+	//pprofPort http server port
+	pprofPort uint64
+)
 
 // startCmd represents the start command
 var startCmd = &cobra.Command{
@@ -57,51 +71,103 @@ var startCmd = &cobra.Command{
 
 		// Create seele service and register the service
 		slog := log.GetLogger("seele")
+		lightLog := log.GetLogger("seele-light")
 		serviceContext := seele.ServiceContext{
 			DataDir: nCfg.BasicConfig.DataDir,
 		}
 		ctx := context.WithValue(context.Background(), "ServiceContext", serviceContext)
-		seeleService, err := seele.NewSeeleService(ctx, nCfg, slog)
+
+		miningEngine, err := factory.GetConsensusEngine(nCfg.BasicConfig.MinerAlgorithm)
 		if err != nil {
-			fmt.Println(err.Error())
+			fmt.Println(err)
 			return
 		}
 
-		seeleService.Miner().SetThreads(threads)
-
-		// monitor service
-		monitorService, err := monitor.NewMonitorService(seeleService, seeleNode, nCfg, slog, "Test monitor")
-		if err != nil {
-			fmt.Println(err.Error())
-			return
+		// start pprof http server
+		if pprofPort > 0 {
+			go func() {
+				if err := http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", pprofPort), nil); err != nil {
+					fmt.Println("Failed to start pprof http server,", err)
+					return
+				}
+			}()
 		}
 
-		services := []node.Service{seeleService, monitorService}
-		for _, service := range services {
-			if err := seeleNode.Register(service); err != nil {
+		if lightNode {
+			lightService, err := light.NewServiceClient(ctx, nCfg, lightLog, common.LightChainDir, seeleNode.GetShardNumber(), miningEngine)
+			if err != nil {
+				fmt.Println("Create light service error.", err.Error())
+				return
+			}
+
+			if err := seeleNode.Register(lightService); err != nil {
 				fmt.Println(err.Error())
 				return
 			}
-		}
 
-		err = seeleNode.Start()
-		if err != nil {
-			fmt.Printf("got error when start node: %s\n", err)
-			return
-		}
-
-		minerInfo := strings.ToLower(miner)
-		if minerInfo == "start" {
-			err = seeleService.Miner().Start()
-			if err != nil && err != miner2.ErrMinerIsRunning {
-				fmt.Println("failed to start the miner : ", err)
+			err = seeleNode.Start()
+			if err != nil {
+				fmt.Printf("got error when start node: %s\n", err)
 				return
 			}
-		} else if minerInfo == "stop" {
-			seeleService.Miner().Stop()
 		} else {
-			fmt.Println("invalid miner command, must be start or stop")
-			return
+			// light client manager
+			manager, err := lightclients.NewLightClientManager(seeleNode.GetShardNumber(), ctx, nCfg, miningEngine)
+			if err != nil {
+				fmt.Printf("create light client manager failed. %s", err)
+				return
+			}
+
+			// fullnode mode
+			seeleService, err := seele.NewSeeleService(ctx, nCfg, slog, miningEngine, manager)
+			if err != nil {
+				fmt.Println(err.Error())
+				return
+			}
+
+			seeleService.Miner().SetThreads(threads)
+
+			lightServerService, err := light.NewServiceServer(seeleService, nCfg, lightLog, seeleNode.GetShardNumber())
+			if err != nil {
+				fmt.Println("Create light server err. ", err.Error())
+				return
+			}
+
+			// monitor service
+			monitorService, err := monitor.NewMonitorService(seeleService, seeleNode, nCfg, slog, "Test monitor")
+			if err != nil {
+				fmt.Println(err.Error())
+				return
+			}
+
+			services := manager.GetServices()
+			services = append(services, seeleService, monitorService, lightServerService)
+			for _, service := range services {
+				if err := seeleNode.Register(service); err != nil {
+					fmt.Println(err.Error())
+					return
+				}
+			}
+
+			err = seeleNode.Start()
+			if err != nil {
+				fmt.Printf("got error when start node: %s\n", err)
+				return
+			}
+
+			minerInfo := strings.ToLower(miner)
+			if minerInfo == "start" {
+				err = seeleService.Miner().Start()
+				if err != nil && err != miner2.ErrMinerIsRunning {
+					fmt.Println("failed to start the miner : ", err)
+					return
+				}
+			} else if minerInfo == "stop" {
+				seeleService.Miner().Stop()
+			} else {
+				fmt.Println("invalid miner command, must be start or stop")
+				return
+			}
 		}
 
 		if metricsEnableFlag {
@@ -129,5 +195,7 @@ func init() {
 	startCmd.Flags().StringVarP(&miner, "miner", "m", "start", "miner start or not, [start, stop]")
 	startCmd.Flags().BoolVarP(&metricsEnableFlag, "metrics", "t", false, "start metrics")
 	startCmd.Flags().StringVarP(&accountsConfig, "accounts", "", "", "init accounts info")
-	startCmd.Flags().UintVarP(&threads, "threads", "", 1, "miner thread value")
+	startCmd.Flags().IntVarP(&threads, "threads", "", 1, "miner thread value")
+	startCmd.Flags().BoolVarP(&lightNode, "light", "l", false, "whether start with light mode")
+	startCmd.Flags().Uint64VarP(&pprofPort, "port", "", 0, "which port pprof http server listen to")
 }

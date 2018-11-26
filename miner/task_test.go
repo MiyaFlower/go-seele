@@ -10,13 +10,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magiconair/properties/assert"
 	"github.com/seeleteam/go-seele/common"
+	"github.com/seeleteam/go-seele/consensus"
 	"github.com/seeleteam/go-seele/core/state"
 	"github.com/seeleteam/go-seele/core/types"
 	"github.com/seeleteam/go-seele/database/leveldb"
-	"github.com/seeleteam/go-seele/miner/pow"
+	"github.com/stretchr/testify/assert"
 )
+
+func getTask(difficult int64) *Task {
+	return &Task{
+		header: &types.BlockHeader{
+			Difficulty: big.NewInt(difficult),
+		},
+	}
+}
 
 func newTestBlockHeader() *types.BlockHeader {
 	return &types.BlockHeader{
@@ -27,7 +35,7 @@ func newTestBlockHeader() *types.BlockHeader {
 		Difficulty:        big.NewInt(1),
 		Height:            1,
 		CreateTimestamp:   big.NewInt(time.Now().Unix()),
-		Nonce:             1,
+		Witness:           make([]byte, 0),
 		ExtraData:         common.CopyBytes([]byte("ExtraData")),
 	}
 }
@@ -46,5 +54,5 @@ func Test_handleMinerRewardTx(t *testing.T) {
 	reward, err := task.handleMinerRewardTx(statedb)
 
 	assert.Equal(t, err, nil)
-	assert.Equal(t, reward, pow.GetReward(task.header.Height))
+	assert.Equal(t, reward, consensus.GetReward(task.header.Height))
 }

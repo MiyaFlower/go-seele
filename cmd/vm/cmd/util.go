@@ -13,11 +13,10 @@ import (
 	"time"
 
 	"github.com/seeleteam/go-seele/common"
-	"github.com/seeleteam/go-seele/core"
 	"github.com/seeleteam/go-seele/core/state"
 	"github.com/seeleteam/go-seele/core/store"
+	"github.com/seeleteam/go-seele/core/svm"
 	"github.com/seeleteam/go-seele/core/types"
-	"github.com/seeleteam/go-seele/core/vm"
 	"github.com/seeleteam/go-seele/crypto"
 	"github.com/seeleteam/go-seele/database"
 	"github.com/seeleteam/go-seele/database/leveldb"
@@ -137,7 +136,7 @@ func preprocessContract() (database.Database, *state.Statedb, store.BlockchainSt
 			return
 		}
 
-		db.PutString(KeyStateRootHash, hash.ToHex())
+		db.PutString(KeyStateRootHash, hash.Hex())
 		db.Close()
 	}, nil
 }
@@ -154,11 +153,14 @@ func processContract(statedb *state.Statedb, bcStore store.BlockchainStore, tx *
 		Difficulty:        big.NewInt(38),
 		Height:            666,
 		CreateTimestamp:   big.NewInt(time.Now().Unix()),
-		Nonce:             DefaultNonce,
 		ExtraData:         make([]byte, 0),
 	}
 
-	evmContext := core.NewEVMContext(tx, header, header.Creator, bcStore)
-
-	return core.ProcessContract(evmContext, tx, 0, statedb, &vm.Config{})
+	ctx := &svm.Context{
+		Tx:          tx,
+		Statedb:     statedb,
+		BlockHeader: header,
+		BcStore:     bcStore,
+	}
+	return svm.Process(ctx)
 }

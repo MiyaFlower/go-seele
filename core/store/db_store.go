@@ -13,22 +13,25 @@ import (
 	"github.com/seeleteam/go-seele/common"
 	"github.com/seeleteam/go-seele/core/types"
 	"github.com/seeleteam/go-seele/database"
+	"github.com/syndtr/goleveldb/leveldb/errors"
 )
 
 var (
 	keyHeadBlockHash = []byte("HeadBlockHash")
 
-	keyPrefixHash     = []byte("H")
-	keyPrefixHeader   = []byte("h")
-	keyPrefixTD       = []byte("t")
-	keyPrefixBody     = []byte("b")
-	keyPrefixReceipts = []byte("r")
-	keyPrefixTxIndex  = []byte("i")
+	keyPrefixHash      = []byte("H")
+	keyPrefixHeader    = []byte("h")
+	keyPrefixTD        = []byte("t")
+	keyPrefixBody      = []byte("b")
+	keyPrefixReceipts  = []byte("r")
+	keyPrefixTxIndex   = []byte("i")
+	keyPrefixDebtIndex = []byte("d")
 )
 
 // blockBody represents the payload of a block
 type blockBody struct {
-	Txs []*types.Transaction // Txs is a transaction collection
+	Txs   []*types.Transaction // Txs is a transaction collection
+	Debts []*types.Debt        // Debts is a debt collection
 }
 
 // blockchainDatabase wraps a database used for the blockchain
@@ -49,12 +52,13 @@ func NewBlockchainDatabase(db database.Database) BlockchainStore {
 	return &blockchainDatabase{db}
 }
 
-func heightToHashKey(height uint64) []byte  { return append(keyPrefixHash, encodeBlockHeight(height)...) }
-func hashToHeaderKey(hash []byte) []byte    { return append(keyPrefixHeader, hash...) }
-func hashToTDKey(hash []byte) []byte        { return append(keyPrefixTD, hash...) }
-func hashToBodyKey(hash []byte) []byte      { return append(keyPrefixBody, hash...) }
-func hashToReceiptsKey(hash []byte) []byte  { return append(keyPrefixReceipts, hash...) }
-func txHashToIndexKey(txHash []byte) []byte { return append(keyPrefixTxIndex, txHash...) }
+func heightToHashKey(height uint64) []byte      { return append(keyPrefixHash, encodeBlockHeight(height)...) }
+func hashToHeaderKey(hash []byte) []byte        { return append(keyPrefixHeader, hash...) }
+func hashToTDKey(hash []byte) []byte            { return append(keyPrefixTD, hash...) }
+func hashToBodyKey(hash []byte) []byte          { return append(keyPrefixBody, hash...) }
+func hashToReceiptsKey(hash []byte) []byte      { return append(keyPrefixReceipts, hash...) }
+func txHashToIndexKey(txHash []byte) []byte     { return append(keyPrefixTxIndex, txHash...) }
+func debtHashToIndexKey(debtHash []byte) []byte { return append(keyPrefixDebtIndex, debtHash...) }
 
 // GetBlockHash gets the hash of the block with the specified height in the blockchain database
 func (store *blockchainDatabase) GetBlockHash(height uint64) (common.Hash, error) {
@@ -163,16 +167,30 @@ func (store *blockchainDatabase) putBlockInternal(hash common.Hash, header *type
 
 	if body != nil {
 		batch.Put(hashToBodyKey(hashBytes), common.SerializePanic(body))
-
-		// Write index for each tx.
-		for i, tx := range body.Txs {
-			idx := types.TxIndex{BlockHash: hash, Index: uint(i)}
-			encodedTxIndex := common.SerializePanic(idx)
-			batch.Put(txHashToIndexKey(tx.Hash.Bytes()), encodedTxIndex)
-		}
 	}
 
 	if isHead {
+		// delete old txs/debts indices in old canonical chain if exists
+		oldHash, err := store.GetBlockHash(header.Height)
+		if err != nil && err != errors.ErrNotFound {
+			return err
+		}
+
+		if err == nil {
+			oldBlock, err := store.GetBlock(oldHash)
+			if err != nil {
+				return err
+			}
+
+			store.batchDeleteIndices(batch, oldHash, oldBlock.Transactions, oldBlock.Debts)
+		}
+
+		// add or update txs/debts indices of new HEAD block
+		if body != nil {
+			store.batchAddIndices(batch, hash, body.Txs, body.Debts)
+		}
+
+		// update height to hash map in canonical chain and HEAD block hash
 		batch.Put(heightToHashKey(header.Height), hashBytes)
 		batch.Put(keyHeadBlockHash, hashBytes)
 	}
@@ -202,7 +220,7 @@ func (store *blockchainDatabase) PutBlock(block *types.Block, td *big.Int, isHea
 		panic("block is nil")
 	}
 
-	return store.putBlockInternal(block.HeaderHash, block.Header, &blockBody{block.Transactions}, td, isHead)
+	return store.putBlockInternal(block.HeaderHash, block.Header, &blockBody{block.Transactions, block.Debts}, td, isHead)
 }
 
 // GetBlock gets the block with the specified hash in the blockchain database
@@ -239,6 +257,7 @@ func (store *blockchainDatabase) GetBlock(hash common.Hash) (*types.Block, error
 		HeaderHash:   hash,
 		Header:       header,
 		Transactions: body.Txs,
+		Debts:        body.Debts,
 	}, nil
 }
 
@@ -276,11 +295,9 @@ func (store *blockchainDatabase) DeleteBlock(hash common.Hash) error {
 		return err
 	}
 
-	// delete all tx index in block
-	for _, tx := range body.Txs {
-		if err = store.delete(batch, txHashToIndexKey(tx.Hash.Bytes())); err != nil {
-			return err
-		}
+	// delete the tx/debt indices of the block.
+	if err = store.batchDeleteIndices(batch, hash, body.Txs, body.Debts); err != nil {
+		return err
 	}
 
 	// delete body
@@ -364,6 +381,25 @@ func (store *blockchainDatabase) GetReceiptByTxHash(txHash common.Hash) (*types.
 	return receipts[txIndex.Index], nil
 }
 
+// AddIndices adds tx/debt indices for the specified block.
+func (store *blockchainDatabase) AddIndices(block *types.Block) error {
+	batch := store.db.NewBatch()
+	store.batchAddIndices(batch, block.HeaderHash, block.Transactions, block.Debts)
+	return batch.Commit()
+}
+
+func (store *blockchainDatabase) batchAddIndices(batch database.Batch, blockHash common.Hash, txs []*types.Transaction, debts []*types.Debt) {
+	for i, tx := range txs {
+		idx := types.TxIndex{BlockHash: blockHash, Index: uint(i)}
+		batch.Put(txHashToIndexKey(tx.Hash.Bytes()), common.SerializePanic(idx))
+	}
+
+	for i, debt := range debts {
+		idx := types.DebtIndex{BlockHash: blockHash, Index: uint(i)}
+		batch.Put(debtHashToIndexKey(debt.Hash.Bytes()), common.SerializePanic(idx))
+	}
+}
+
 // GetTxIndex retrieves the tx index for the specified tx hash.
 func (store *blockchainDatabase) GetTxIndex(txHash common.Hash) (*types.TxIndex, error) {
 	data, err := store.db.Get(txHashToIndexKey(txHash.Bytes()))
@@ -377,4 +413,56 @@ func (store *blockchainDatabase) GetTxIndex(txHash common.Hash) (*types.TxIndex,
 	}
 
 	return index, nil
+}
+
+// GetTxIndex retrieves the tx index for the specified tx hash.
+func (store *blockchainDatabase) GetDebtIndex(debtHash common.Hash) (*types.DebtIndex, error) {
+	data, err := store.db.Get(debtHashToIndexKey(debtHash.Bytes()))
+	if err != nil {
+		return nil, err
+	}
+
+	index := &types.DebtIndex{}
+	if err := common.Deserialize(data, index); err != nil {
+		return nil, err
+	}
+
+	return index, nil
+}
+
+// DeleteIndices deletes tx/debt indices of the specified block.
+func (store *blockchainDatabase) DeleteIndices(block *types.Block) error {
+	batch := store.db.NewBatch()
+
+	if err := store.batchDeleteIndices(batch, block.HeaderHash, block.Transactions, block.Debts); err != nil {
+		return err
+	}
+
+	return batch.Commit()
+}
+
+func (store *blockchainDatabase) batchDeleteIndices(batch database.Batch, blockHash common.Hash, txs []*types.Transaction, debts []*types.Debt) error {
+	for _, tx := range txs {
+		idx, err := store.GetTxIndex(tx.Hash)
+		if err != nil {
+			return err
+		}
+
+		if idx.BlockHash.Equal(blockHash) {
+			batch.Delete(txHashToIndexKey(tx.Hash.Bytes()))
+		}
+	}
+
+	for _, debt := range debts {
+		idx, err := store.GetDebtIndex(debt.Hash)
+		if err != nil {
+			return err
+		}
+
+		if idx.BlockHash.Equal(blockHash) {
+			batch.Delete(debtHashToIndexKey(debt.Hash.Bytes()))
+		}
+	}
+
+	return nil
 }

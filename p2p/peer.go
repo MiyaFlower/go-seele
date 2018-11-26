@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seeleteam/go-seele/common"
+
 	"github.com/seeleteam/go-seele/log"
 	"github.com/seeleteam/go-seele/p2p/discovery"
 )
@@ -36,27 +38,11 @@ type Peer struct {
 }
 
 // NewPeer creates and returns a new peer.
-func NewPeer(conn *connection, protocols []Protocol, log *log.SeeleLog, node *discovery.Node) *Peer {
+func NewPeer(conn *connection, log *log.SeeleLog, node *discovery.Node) *Peer {
 	closed := make(chan struct{})
-	offset := baseProtoCode
-	protoMap := make(map[string]protocolRW)
-	for _, p := range protocols {
-		protoRW := protocolRW{
-			rw:       conn,
-			offset:   offset,
-			Protocol: p,
-			in:       make(chan Message, 1),
-			close:    closed,
-		}
-
-		protoMap[p.cap().String()] = protoRW
-		offset += p.Length
-		log.Debug("NewPeer called, add protocol: %s", p.cap())
-	}
 
 	return &Peer{
 		rw:            conn,
-		protocolMap:   protoMap,
 		disconnection: make(chan string),
 		closed:        closed,
 		log:           log,
@@ -64,6 +50,27 @@ func NewPeer(conn *connection, protocols []Protocol, log *log.SeeleLog, node *di
 		Node:          node,
 		lock:          sync.Mutex{},
 	}
+}
+
+func (p *Peer) setProtocols(protocols []Protocol) {
+	offset := baseProtoCode
+	protoMap := make(map[string]protocolRW)
+	for _, protocol := range protocols {
+		protoRW := protocolRW{
+			bQuited:  false,
+			rw:       p.rw,
+			offset:   offset,
+			Protocol: protocol,
+			in:       make(chan Message, 1),
+			close:    p.closed,
+		}
+
+		protoMap[protocol.cap().String()] = protoRW
+		offset += protocol.Length
+		p.log.Debug("setProtocols called, add protocol: %s", protocol.cap())
+	}
+
+	p.protocolMap = protoMap
 }
 
 func (p *Peer) getShardNumber() uint {
@@ -129,7 +136,7 @@ func (p *Peer) pingLoop() {
 }
 
 func (p *Peer) readLoop(readErr chan<- error) {
-	defer p.log.Debug("exit read loop")
+	defer p.log.Debug("exit read loop, remote: %s", p.RemoteAddr())
 	defer p.wg.Done()
 	for {
 		msgRecv, err := p.rw.ReadMsg()
@@ -137,6 +144,7 @@ func (p *Peer) readLoop(readErr chan<- error) {
 			readErr <- err
 			return
 		}
+
 		if err = p.handle(msgRecv); err != nil {
 			readErr <- err
 			return
@@ -146,15 +154,23 @@ func (p *Peer) readLoop(readErr chan<- error) {
 
 func (p *Peer) notifyProtocolsAddPeer() {
 	p.wg.Add(len(p.protocolMap))
-	p.log.Info("notifyProtocolsAddPeer called, len(protocolMap)=%d, %s -> %s",
-		len(p.protocolMap), p.LocalAddr(), p.RemoteAddr())
+	p.log.Info("notifyProtocolsAddPeer called, len(protocolMap)= %d, %s -> %s", len(p.protocolMap), p.LocalAddr(), p.RemoteAddr())
 	for _, proto := range p.protocolMap {
 		go func(proto protocolRW) {
 			defer p.wg.Done()
 
 			if proto.AddPeer != nil {
-				p.log.Debug("protocol.AddPeer called. protocol:%s", proto.cap())
-				proto.AddPeer(p, &proto)
+				p.log.Debug("protocol.AddPeer called. protocol: %s", proto.cap())
+				if !proto.AddPeer(p, &proto) {
+					proto.bQuited = true
+
+					// seele protocol is the highest weight, tcp of peer need to be closed
+					if proto.Name == common.SeeleProtoName {
+						p.log.Debug("notifyProtocolsAddPeer AddPeer err got. name=%s node=%s", proto.Name, fmt.Sprintf("%x", p.Node.ID))
+						// close connection of peer
+						p.Disconnect("Seeleproto addpeer err, close connection")
+					}
+				}
 			}
 		}(proto)
 	}
@@ -205,7 +221,9 @@ func (p *Peer) handle(msgRecv *Message) error {
 		return fmt.Errorf(fmt.Sprintf("could not found mapping proto with code %d", msgRecv.Code))
 	}
 
-	protocolTarget.in <- *msgRecv
+	if !protocolTarget.bQuited {
+		protocolTarget.in <- *msgRecv
+	}
 
 	return nil
 }
@@ -233,10 +251,11 @@ func (p *Peer) Disconnect(reason string) {
 
 type protocolRW struct {
 	Protocol
-	offset uint16
-	in     chan Message // read message channel, message will be transferred here when it is a protocol message
-	rw     MsgReadWriter
-	close  chan struct{}
+	bQuited bool
+	offset  uint16
+	in      chan Message // read message channel, message will be transferred here when it is a protocol message
+	rw      MsgReadWriter
+	close   chan struct{}
 }
 
 func (rw *protocolRW) WriteMsg(msg *Message) (err error) {
@@ -302,7 +321,7 @@ func (p *Peer) Info() *PeerInfo {
 	}
 
 	info := &PeerInfo{
-		ID:        p.Node.ID.ToHex(),
+		ID:        p.Node.ID.Hex(),
 		Caps:      caps,
 		Protocols: protocols,
 		Shard:     p.getShardNumber(),

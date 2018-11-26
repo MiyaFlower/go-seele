@@ -8,13 +8,15 @@ package types
 import (
 	"crypto/ecdsa"
 	"encoding/json"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
 
-	"github.com/magiconair/properties/assert"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/seeleteam/go-seele/common"
 	"github.com/seeleteam/go-seele/crypto"
+	"github.com/stretchr/testify/assert"
 )
 
 func randomAccount(t *testing.T) (*ecdsa.PrivateKey, common.Address) {
@@ -33,11 +35,11 @@ func randomAddress(t *testing.T) common.Address {
 	return address
 }
 
-func newTestTx(t *testing.T, amount, fee, nonce uint64, sign bool) *Transaction {
+func newTestTx(t *testing.T, amount, price, nonce uint64, sign bool) *Transaction {
 	fromPrivKey, fromAddress := randomAccount(t)
 	toAddress := randomAddress(t)
 
-	tx, err := NewTransaction(fromAddress, toAddress, new(big.Int).SetUint64(amount), new(big.Int).SetUint64(fee), nonce)
+	tx, err := NewTransaction(fromAddress, toAddress, new(big.Int).SetUint64(amount), new(big.Int).SetUint64(price), nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +82,7 @@ func newTestStateDB(address common.Address, nonce, balance uint64) *mockStateDB 
 // Validate successfully if no data changed.
 func Test_Transaction_Validate_NoDataChange(t *testing.T) {
 	tx := newTestTx(t, 100, 2, 38, true)
-	statedb := newTestStateDB(tx.Data.From, 38, 200)
+	statedb := newTestStateDB(tx.Data.From, 38, 200000)
 	err := tx.Validate(statedb)
 	assert.Equal(t, err, error(nil))
 }
@@ -99,6 +101,14 @@ func Benchmark_Transaction_ValidateWithoutState(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		tx.ValidateWithoutState(true, true)
+	}
+}
+
+func Benchmark_Transaction_ValidateWithoutSig(b *testing.B) {
+	tx := newTestTx(nil, 100, 2, 38, true)
+
+	for i := 0; i < b.N; i++ {
+		tx.ValidateWithoutState(false, true)
 	}
 }
 
@@ -198,11 +208,11 @@ func Test_Transaction_Validate_PayloadOversized(t *testing.T) {
 	to := crypto.MustGenerateRandomAddress()
 
 	// Cannot create a tx with oversized payload.
-	tx, err := NewMessageTransaction(*from, *to, big.NewInt(100), big.NewInt(1), 38, make([]byte, MaxPayloadSize+1))
+	tx, err := NewMessageTransaction(*from, *to, big.NewInt(100), big.NewInt(1), math.MaxUint64, 38, make([]byte, MaxPayloadSize+1))
 	assert.Equal(t, err, ErrPayloadOversized)
 
 	// Create a tx with valid payload
-	tx, err = NewMessageTransaction(*from, *to, big.NewInt(100), big.NewInt(1), 38, []byte("hello"))
+	tx, err = NewMessageTransaction(*from, *to, big.NewInt(100), big.NewInt(1), math.MaxUint64, 38, []byte("hello"))
 	assert.Equal(t, err, error(nil))
 	tx.Data.Payload = make([]byte, MaxPayloadSize+1) // modify the payload to invalid size.
 
@@ -227,7 +237,7 @@ func Test_Transaction_Validate_PayLoadJSON(t *testing.T) {
 
 	from := crypto.MustGenerateRandomAddress()
 	to := crypto.MustGenerateRandomAddress()
-	tx2, err := NewMessageTransaction(*from, *to, big.NewInt(100), big.NewInt(1), 38, []byte("hello"))
+	tx2, err := NewMessageTransaction(*from, *to, big.NewInt(100), big.NewInt(1), math.MaxUint64, 38, []byte("hello"))
 	assert.Equal(t, err, nil)
 	assert.Equal(t, string(tx2.Data.Payload), "hello")
 
@@ -250,69 +260,31 @@ func prepareShardEnv(localShard uint) func() {
 	}
 }
 
-func Test_Transaction_Validate_InvalidFromShard(t *testing.T) {
-	dispose := prepareShardEnv(9)
-	defer dispose()
-
-	from, _ := crypto.MustGenerateShardKeyPair(1) // invalid shard
-	to := crypto.MustGenerateShardAddress(9)
-	_, err := NewTransaction(*from, *to, big.NewInt(20), big.NewInt(10), 5)
-
-	assert.Equal(t, err != nil, true)
-	assert.Equal(t, strings.Contains(err.Error(), "invalid from address"), true)
-}
-
-func Test_Transaction_Validate_InvalidToShard(t *testing.T) {
-	dispose := prepareShardEnv(9)
-	defer dispose()
-
-	from, _ := crypto.MustGenerateShardKeyPair(9)
-	to := crypto.MustGenerateShardAddress(1) // invalid shard
-	_, err := NewTransaction(*from, *to, big.NewInt(20), big.NewInt(10), 5)
-
-	assert.Equal(t, err != nil, true)
-	assert.Equal(t, strings.Contains(err.Error(), "invalid to address"), true)
-}
-
-func Test_Transaction_Validate_InvalidContractShard(t *testing.T) {
-	dispose := prepareShardEnv(9)
-	defer dispose()
-
-	// From address in one shard, but contract address in another shard.
-	from, _ := crypto.MustGenerateShardKeyPair(9)
-	to := crypto.MustGenerateShardAddress(15)
-	contractAddr := crypto.CreateAddress(*to, 38)
-	_, err := NewMessageTransaction(*from, contractAddr, big.NewInt(20), big.NewInt(10), 5, []byte("contract message"))
-
-	assert.Equal(t, err != nil, true)
-	assert.Equal(t, strings.Contains(err.Error(), "invalid to address"), true)
-}
-
-func Test_Transaction_InvalidFee(t *testing.T) {
-	dispose := prepareShardEnv(9)
+func Test_Transaction_InvalidPrice(t *testing.T) {
+	dispose := prepareShardEnv(2)
 	defer dispose()
 
 	// From and contract addresses match the shard number.
-	from := crypto.MustGenerateShardAddress(9)
-	contractAddr := crypto.MustGenerateShardAddress(9)
+	from := crypto.MustGenerateShardAddress(2)
+	contractAddr := crypto.MustGenerateShardAddress(2)
 
 	tx, err := NewTransaction(*from, *contractAddr, big.NewInt(20), big.NewInt(-1), 5)
 	assert.Equal(t, tx, (*Transaction)(nil))
-	assert.Equal(t, err, ErrFeeNegative)
+	assert.Equal(t, err, ErrPriceNegative)
 
 	tx, err = NewTransaction(*from, *contractAddr, big.NewInt(20), nil, 5)
 	assert.Equal(t, tx, (*Transaction)(nil))
-	assert.Equal(t, err, ErrFeeNil)
+	assert.Equal(t, err, ErrPriceNil)
 }
 
 func Test_Transaction_EmptyPayloadError(t *testing.T) {
 	from := *crypto.MustGenerateRandomAddress()
 
-	_, err := NewContractTransaction(from, big.NewInt(100), big.NewInt(2), 38, nil)
+	_, err := NewContractTransaction(from, big.NewInt(100), big.NewInt(2), math.MaxUint64, 38, nil)
 	assert.Equal(t, err, ErrPayloadEmpty)
 
 	contractAddr := crypto.CreateAddress(from, 77)
-	_, err = NewMessageTransaction(from, contractAddr, big.NewInt(100), big.NewInt(2), 38, nil)
+	_, err = NewMessageTransaction(from, contractAddr, big.NewInt(100), big.NewInt(2), math.MaxUint64, 38, nil)
 	assert.Equal(t, err, ErrPayloadEmpty)
 }
 
@@ -320,7 +292,7 @@ func Test_Transaction_Validate_EmptyPayloadError(t *testing.T) {
 	fromPrivKey, fromAddr := randomAccount(t)
 	toAddress := crypto.CreateAddress(fromAddr, 38)
 
-	tx, err := newTx(fromAddr, toAddress, big.NewInt(100), big.NewInt(2), 38, []byte("payload"))
+	tx, err := newTx(fromAddr, toAddress, big.NewInt(100), big.NewInt(2), math.MaxUint64, 38, []byte("payload"))
 	assert.Equal(t, err, nil)
 
 	tx.Data.Payload = nil
@@ -349,7 +321,7 @@ func Test_Transaction_RlpTransferTx(t *testing.T) {
 
 func Test_Transaction_RlpContractTx(t *testing.T) {
 	from := *crypto.MustGenerateRandomAddress()
-	tx, err := NewContractTransaction(from, big.NewInt(3), big.NewInt(1), 38, []byte("test code"))
+	tx, err := NewContractTransaction(from, big.NewInt(3), big.NewInt(1), math.MaxUint64, 38, []byte("test code"))
 	assert.Equal(t, err, nil)
 
 	assertTxRlp(t, tx)
@@ -359,7 +331,7 @@ func Test_Transaction_RlpMsgTx(t *testing.T) {
 	from := *crypto.MustGenerateRandomAddress()
 	to := *crypto.MustGenerateRandomAddress()
 	contractAddr := crypto.CreateAddress(to, 38)
-	tx, err := NewMessageTransaction(from, contractAddr, big.NewInt(3), big.NewInt(1), 38, []byte("test input message"))
+	tx, err := NewMessageTransaction(from, contractAddr, big.NewInt(3), big.NewInt(1), math.MaxUint64, 38, []byte("test input message"))
 	assert.Equal(t, err, nil)
 
 	assertTxRlp(t, tx)
@@ -382,4 +354,46 @@ func Test_Transaction_InvalidAmount(t *testing.T) {
 
 	_, err = NewTransaction(fromAddress, toAddress, big.NewInt(-1), new(big.Int).SetInt64(1), 0)
 	assert.Equal(t, err, ErrAmountNegative)
+}
+
+func Test_Transaction_IntrinsicGasError(t *testing.T) {
+	from := *crypto.MustGenerateRandomAddress()
+	to := *crypto.MustGenerateRandomAddress()
+	tx, err := newTx(from, to, big.NewInt(38), big.NewInt(1), 1, 1, nil)
+
+	assert.Nil(t, tx)
+	assert.Equal(t, ErrIntrinsicGas, err)
+}
+
+func Test_Transaction_IntrinsicGasOverflow(t *testing.T) {
+	overflowPayloadSize := (math.MaxUint64 - params.TxGas) / params.TxDataNonZeroGas
+	assert.Equal(t, overflowPayloadSize > defaultMaxPayloadSize, true)
+}
+
+func Test_Transaction_BatchValidateTxs_NoSig(t *testing.T) {
+	var txs []*Transaction
+
+	for i := 0; i < 100; i++ {
+		txs = append(txs, newTestTx(t, 1, 1, uint64(i), false))
+	}
+
+	assert.Equal(t, ErrSigMissing, BatchValidateTxs(txs))
+}
+
+func Test_Transaction_SigCache(t *testing.T) {
+	sigCache.Purge()
+
+	// succeed to verify signature of valid tx
+	tx := newTestTx(t, 1, 1, 1, true)
+	assert.NoError(t, tx.verifySignature())
+	assert.Equal(t, 1, sigCache.Len())
+
+	// verify again, and cache is used.
+	assert.NoError(t, tx.verifySignature())
+	assert.Equal(t, 1, sigCache.Len())
+
+	// change the tx signature, and tx hash not changed yet.
+	tx.Signature.Sig = []byte{1, 2, 3}
+	assert.Equal(t, ErrSigInvalid, tx.verifySignature())
+	assert.Equal(t, 2, sigCache.Len())
 }

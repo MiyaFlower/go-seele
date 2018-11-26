@@ -26,7 +26,7 @@ func Test_Hash(t *testing.T) {
 func Test_StringHash(t *testing.T) {
 	str := "5aaeb6053f3e94c9b9a09f33669435e7"
 	hash := StringToHash(str)
-	res := hash.String()
+	res := string(hash.Bytes())
 
 	assert.Equal(t, str, res)
 }
@@ -44,7 +44,7 @@ func Test_ToHex(t *testing.T) {
 	str := "5aaeb6053f3e94c9b9a09f33669435e7"
 	hash := StringToHash(str)
 
-	assert.Equal(t, hash.ToHex(), "0x3561616562363035336633653934633962396130396633333636393433356537")
+	assert.Equal(t, hash.Hex(), "0x3561616562363035336633653934633962396130396633333636393433356537")
 }
 
 func Test_IsEmpty(t *testing.T) {

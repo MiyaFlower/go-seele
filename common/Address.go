@@ -10,6 +10,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"encoding/binary"
+	"fmt"
 	"math/big"
 
 	"github.com/seeleteam/go-seele/common/errors"
@@ -26,29 +27,43 @@ import (
 type AddressType byte
 
 const (
-	addressLen = 20 // length in bytes
+	// AddressLen length in bytes
+	AddressLen = 20
 
 	// AddressTypeExternal is the address type for external account.
 	AddressTypeExternal = AddressType(1)
+
 	// AddressTypeContract is the address type for contract account.
 	AddressTypeContract = AddressType(2)
+
+	// AddressTypeReserved is the reserved address type for system contract.
+	// Note, the address type (4 bits) value ranges [0,15], so the system reserved
+	// address type value should greater than 15.
+	AddressTypeReserved = AddressType(16)
 )
 
 // EmptyAddress presents an empty address
 var EmptyAddress = Address{}
 
+// MaxSystemContractAddress max system contract address
+var MaxSystemContractAddress = BytesToAddress([]byte{4, 255})
+
 // Address we use public key as node id
-type Address [addressLen]byte
+type Address [AddressLen]byte
 
 // NewAddress converts a byte slice to a Address
 func NewAddress(b []byte) (Address, error) {
 	// Validate length
-	if len(b) != addressLen {
-		return EmptyAddress, errors.Create(errors.ErrAddressLenInvalid, len(b), addressLen)
+	if len(b) != AddressLen {
+		return EmptyAddress, errors.Create(errors.ErrAddressLenInvalid, len(b), AddressLen)
 	}
 
 	var id Address
 	copy(id[:], b)
+
+	if err := id.Validate(); err != nil {
+		return EmptyAddress, err
+	}
 
 	return id, nil
 }
@@ -68,9 +83,36 @@ func PubKeyToAddress(pubKey *ecdsa.PublicKey, hashFunc func(interface{}) Hash) A
 	return addr
 }
 
+// Validate check whether the address is valid.
+func (id *Address) Validate() error {
+	if id.IsEmpty() {
+		return nil
+	}
+
+	if addrType := id.Type(); addrType < AddressTypeReserved && (addrType < AddressTypeExternal || addrType > AddressTypeContract) {
+		return fmt.Errorf("invalid address type %v, address = %v", addrType, id.Hex())
+	}
+
+	return nil
+}
+
+// IsEVMContract indicates whether the address is EVM contract address.
+func (id *Address) IsEVMContract() bool {
+	return id.Type() == AddressTypeContract
+}
+
 // Type returns the address type
 func (id *Address) Type() AddressType {
-	return AddressType(id[addressLen-1] & 0x0F)
+	if id.IsReserved() {
+		return AddressTypeReserved
+	}
+
+	return AddressType(id[AddressLen-1] & 0x0F)
+}
+
+// IsReserved returns true if the address is reserved
+func (id *Address) IsReserved() bool {
+	return !id.IsEmpty() && bytes.Compare(id.Bytes(), MaxSystemContractAddress.Bytes()) <= 0
 }
 
 // Bytes get the actual bytes
@@ -86,8 +128,13 @@ func (id Address) Bytes() []byte {
 	return id[:]
 }
 
-// ToHex converts address to 0x prefixed HEX format.
-func (id *Address) ToHex() string {
+// String implements the fmt.Stringer interface
+func (id Address) String() string {
+	return id.Hex()
+}
+
+// Hex converts address to 0x prefixed HEX format.
+func (id Address) Hex() string {
 	return hexutil.BytesToHex(id.Bytes())
 }
 
@@ -144,11 +191,11 @@ func BytesToAddress(bs []byte) Address {
 func BigToAddress(b *big.Int) Address { return BytesToAddress(b.Bytes()) }
 
 // Big converts address to a big int.
-func (id *Address) Big() *big.Int { return new(big.Int).SetBytes(id[:]) }
+func (id Address) Big() *big.Int { return new(big.Int).SetBytes(id[:]) }
 
 // MarshalText marshals the address to HEX string.
 func (id Address) MarshalText() ([]byte, error) {
-	str := id.ToHex()
+	str := id.Hex()
 	return []byte(str), nil
 }
 
@@ -181,7 +228,13 @@ func (id *Address) Shard() uint {
 
 // CreateContractAddress returns a contract address that in the same shard of this address.
 func (id *Address) CreateContractAddress(nonce uint64, hashFunc func(interface{}) Hash) Address {
-	hash := hashFunc([]interface{}{id, nonce}).Bytes()
+	hash := hashFunc([]interface{}{id, nonce})
+	return id.CreateContractAddressWithHash(hash)
+}
+
+// CreateContractAddressWithHash returns a contract address that in the same shard of this address.
+func (id *Address) CreateContractAddressWithHash(h Hash) Address {
+	hash := h.Bytes()
 
 	targetShardNum := id.Shard()
 	var sum uint

@@ -1,11 +1,14 @@
 package p2p
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
 
-	"github.com/magiconair/properties/assert"
+	"github.com/seeleteam/go-seele/log"
+	"github.com/stretchr/testify/assert"
 )
 
 func newConnection() (*connection, net.Listener, error) {
@@ -18,7 +21,7 @@ func newConnection() (*connection, net.Listener, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return &connection{fd: c}, ln, nil
+	return &connection{fd: c, log: log.GetLogger("p2p")}, ln, nil
 }
 
 func Test_Conn_ReadFullAndWriteFull(t *testing.T) {
@@ -39,13 +42,13 @@ func Test_Conn_ReadFullAndWriteFull(t *testing.T) {
 	assert.Equal(t, err, nil)
 
 	readBuff := make([]byte, 10)
-	err = con1.readFullo(readBuff, readTimeout)
+	err = con1.readFullTimeout(readBuff, readTimeout)
 	assert.Equal(t, err, nil)
 	assert.Equal(t, readBuff, writeBuff)
 
 	// Case 2: read with empty buff
 	readBuff1 := make([]byte, 0)
-	err = con1.readFullo(readBuff1, readTimeout)
+	err = con1.readFullTimeout(readBuff1, readTimeout)
 	assert.Equal(t, err, nil)
 	assert.Equal(t, len(readBuff1), 0)
 
@@ -54,7 +57,7 @@ func Test_Conn_ReadFullAndWriteFull(t *testing.T) {
 	assert.Equal(t, err, nil)
 
 	readBuff2 := make([]byte, 20)
-	err = con1.readFullo(readBuff2, readTimeout)
+	err = con1.readFullTimeout(readBuff2, readTimeout)
 	netErr, _ := err.(net.Error)
 	assert.Equal(t, netErr.Timeout(), true)
 
@@ -68,7 +71,7 @@ func Test_Conn_ReadFullAndWriteFull(t *testing.T) {
 	assert.Equal(t, err, nil)
 
 	readBuff3 := make([]byte, 10)
-	err = con1.readFullo(readBuff3, readTimeout)
+	err = con1.readFullTimeout(readBuff3, readTimeout)
 	assert.Equal(t, err, nil)
 	assert.Equal(t, readBuff3[0:], writeBuff[0:10])
 }
@@ -79,31 +82,50 @@ func Test_connection(t *testing.T) {
 	defer con.close()
 	assert.Equal(t, err, nil)
 
-	randStr1 := getRandomString(zipBytesLimit * 10)
-	msg1 := newMessage(randStr1)
-	msg1Copy := *msg1
-
-	err = con.WriteMsg(&msg1Copy)
-	assert.Equal(t, err, nil)
-
 	fd1, err := ln.Accept()
 	assert.Equal(t, err, nil)
 
-	con1 := connection{fd: fd1}
+	con1 := connection{fd: fd1, log: log.GetLogger("p2p")}
+	randStr1 := getRandomString(zipBytesLimit * 10)
+	msg1 := newMessage(randStr1)
+	msg1Copy := *msg1
+	var nounceCnt uint64
+	binary.Read(rand.Reader, binary.BigEndian, &nounceCnt)
+
+	// case 1: client consitent with server
+	err = con.WriteMsg(&msg1Copy)
+	assert.Equal(t, err, nil)
+
 	msg2, err := con1.ReadMsg()
 	assert.Equal(t, err, nil)
 	assert.Equal(t, msg2.Payload, msg1.Payload)
 	assert.Equal(t, string(msg2.Payload), randStr1)
 
+	// case 2: server write with magic
 	randStr2 := getRandomString(10)
 	msg1 = newMessage(randStr2)
-
-	err = con.WriteMsg(msg1)
+	err = con1.WriteMsg(msg1)
 	assert.Equal(t, err, nil)
 
-	msg3, err := con1.ReadMsg()
+	// change the magic
+	magic = [2]byte{'1', '1'}
+	magicNumber = binary.BigEndian.Uint16(magic[:])
+	msg3, err := con.ReadMsg()
+	assert.Equal(t, err, errMagic)
+	assert.Equal(t, msg3, &Message{})
+
+	// case 3: too big size greater than 8M bytes
+	randStr1 = getRandomString(zipBytesLimit)
+	maxSize = 10
+	msg1 = newMessage(randStr1)
+	msg1Copy = *msg1
+	binary.Read(rand.Reader, binary.BigEndian, &nounceCnt)
+	magic = [2]byte{'^', '~'}
+	magicNumber = binary.BigEndian.Uint16(magic[:])
+	err = con.WriteMsg(&msg1Copy)
 	assert.Equal(t, err, nil)
-	assert.Equal(t, msg3.Payload, msg1.Payload)
-	result := string(msg3.Payload)
-	assert.Equal(t, result == randStr2, true)
+
+	msg2, err = con1.ReadMsg()
+	assert.Equal(t, err, errSize)
+	assert.Equal(t, msg2, &Message{})
 }

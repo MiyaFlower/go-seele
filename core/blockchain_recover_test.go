@@ -12,12 +12,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/magiconair/properties/assert"
 	"github.com/seeleteam/go-seele/common"
+	"github.com/seeleteam/go-seele/common/errors"
+	"github.com/seeleteam/go-seele/consensus/pow"
 	"github.com/seeleteam/go-seele/core/store"
 	"github.com/seeleteam/go-seele/core/types"
 	"github.com/seeleteam/go-seele/database"
 	"github.com/seeleteam/go-seele/database/leveldb"
+	"github.com/stretchr/testify/assert"
 )
 
 func newTestRecoveryPointFile() (string, func()) {
@@ -37,7 +39,7 @@ func newTestRecoverableBlockchain(bcStore store.BlockchainStore, stateDB databas
 		panic(err)
 	}
 
-	bc, err := NewBlockchain(bcStore, stateDB, rpFile)
+	bc, err := NewBlockchain(bcStore, stateDB, rpFile, pow.NewEngine(1), nil)
 	if err != nil {
 		panic(err)
 	}
@@ -109,7 +111,7 @@ func Test_RecoveryPoint_PutBlockCorrupted(t *testing.T) {
 	// and the inserted block exists in DB
 	bc := newTestRecoverableBlockchain(bcStore, db, rpFile)
 	newBlock := newTestBlock(bc, bc.genesisBlock.HeaderHash, 1, 3, 0)
-	assert.Equal(t, bc.WriteBlock(newBlock), store.ErrDBCorrupt)
+	assert.True(t, errors.IsOrContains(bc.WriteBlock(newBlock), store.ErrDBCorrupt))
 
 	// the inserted block exists in DB after corruption
 	_, err := bcStore.GetBlock(newBlock.HeaderHash)
@@ -126,8 +128,10 @@ func Test_RecoveryPoint_RecoverDeleteLargerHeightBlocks(t *testing.T) {
 	// height 7 block not deleted before corruption
 	rp := recoveryPoint{LargerHeight: 7}
 	bcStore := store.NewMemStore()
-	bcStore.PutBlockHash(7, common.StringToHash("block 7"))
-	bcStore.PutBlockHash(8, common.StringToHash("block 8"))
+	block7 := newTestRPBlock(common.StringToHash("block 7"), 7)
+	bcStore.PutBlock(block7, big.NewInt(7), true)
+	block8 := newTestRPBlock(common.StringToHash("block 8"), 8)
+	bcStore.PutBlock(block8, big.NewInt(8), true)
 
 	assert.Equal(t, rp.recover(bcStore), nil)
 
@@ -142,7 +146,7 @@ func Test_RecoveryPoint_RecoverDeleteLargerHeightBlocks(t *testing.T) {
 	// height 7 block already deleted before corruption
 	rp = recoveryPoint{LargerHeight: 7}
 	bcStore = store.NewMemStore()
-	bcStore.PutBlockHash(8, common.StringToHash("block 8"))
+	bcStore.PutBlock(block8, big.NewInt(8), true)
 
 	assert.Equal(t, rp.recover(bcStore), nil)
 

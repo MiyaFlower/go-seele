@@ -18,6 +18,7 @@ type peerSet struct {
 	lock         sync.RWMutex
 }
 
+// NewPeerSet returns peerSet pointer
 func NewPeerSet() *peerSet {
 	peers := make(map[uint]map[common.Address]*Peer)
 	for i := 1; i < common.ShardCount+1; i++ {
@@ -29,6 +30,18 @@ func NewPeerSet() *peerSet {
 		shardPeerMap: peers,
 		lock:         sync.RWMutex{},
 	}
+}
+
+func (set *peerSet) getPeers() map[common.Address]*Peer {
+	set.lock.RLock()
+	defer set.lock.RUnlock()
+
+	value := make(map[common.Address]*Peer)
+	for key, v := range set.peerMap {
+		value[key] = v
+	}
+
+	return value
 }
 
 func (set *peerSet) add(p *Peer) {
@@ -59,13 +72,4 @@ func (set *peerSet) delete(p *Peer) {
 
 	delete(set.peerMap, p.Node.ID)
 	delete(set.shardPeerMap[p.getShardNumber()], p.Node.ID)
-}
-
-func (set *peerSet) foreach(call func(p *Peer)) {
-	set.lock.RLock()
-	defer set.lock.RUnlock()
-
-	for _, p := range set.peerMap {
-		call(p)
-	}
 }

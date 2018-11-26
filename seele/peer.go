@@ -24,14 +24,19 @@ const (
 	// DiscHandShakeErr peer handshake error
 	DiscHandShakeErr = "disconnect because got handshake error"
 
-	maxKnownTxs    = 32768 // Maximum transactions hashes to keep in the known list
-	maxKnownBlocks = 1024  // Maximum block hashes to keep in the known list
-	maxKnownDebts  = 32768 // Maximum debt hashes to keep in the known list
+	maxKnownTxs    = 25000 // Maximum transactions hashes to keep in the known list
+	maxKnownBlocks = 250   // Maximum block hashes to keep in the known list
+
+	// the known debts is not the bigger the better. we should forgot old debt for debt resend.
+	// Maximum debt hashes to keep in the known list
+	maxKnownDebts = 10000
 )
 
 var (
-	errMsgNotMatch     = errors.New("Message not match")
-	errNetworkNotMatch = errors.New("NetworkID not match")
+	errMsgNotMatch              = errors.New("Message not match")
+	errNetworkNotMatch          = errors.New("NetworkID not match")
+	errGenesisNotMatch          = errors.New("Genesis not match")
+	errGenesisDifficultNotMatch = errors.New("Genesis Difficult not match")
 )
 
 // PeerInfo represents a short summary of a connected peer.
@@ -110,9 +115,6 @@ func (p *peer) sendTransactionHash(txHash common.Hash) error {
 	}
 	buff := common.SerializePanic(txHash)
 
-	if common.PrintExplosionLog {
-		p.log.Debug("peer send [transactionHashMsgCode] with size %d byte", len(buff))
-	}
 	err := p2p.SendMessage(p.rw, transactionHashMsgCode, buff)
 	if err == nil {
 		p.knownTxs.Add(txHash, nil)
@@ -121,19 +123,23 @@ func (p *peer) sendTransactionHash(txHash common.Hash) error {
 	return err
 }
 
-func (p *peer) sendDebts(debts []*types.Debt) error {
-	filterDebts := make([]*types.Debt, 0)
-	for _, d := range debts {
-		if d != nil && !p.knownDebts.Contains(d.Hash) {
-			filterDebts = append(filterDebts, d)
+func (p *peer) sendDebts(debts []*types.Debt, filter bool) error {
+	var filterDebts []*types.Debt
+	if filter {
+		for _, d := range debts {
+			if d != nil && !p.knownDebts.Contains(d.Hash) {
+				filterDebts = append(filterDebts, d)
+			}
 		}
+	} else {
+		filterDebts = debts
 	}
 
-	buff := common.SerializePanic(debts)
-	p.log.Debug("peer send [debtMsgCode] with size %d bytes", len(buff))
+	buff := common.SerializePanic(filterDebts)
+	p.log.Debug("peer send [debtMsgCode] with size %d bytes and %d debts", len(buff), len(filterDebts))
 	err := p2p.SendMessage(p.rw, debtMsgCode, buff)
 	if err == nil {
-		for _, d := range debts {
+		for _, d := range filterDebts {
 			p.knownDebts.Add(d.Hash, nil)
 		}
 	}
@@ -144,9 +150,6 @@ func (p *peer) sendDebts(debts []*types.Debt) error {
 func (p *peer) sendTransactionRequest(txHash common.Hash) error {
 	buff := common.SerializePanic(txHash)
 
-	if common.PrintExplosionLog {
-		p.log.Debug("peer send [transactionRequestMsgCode] with size %d byte", len(buff))
-	}
 	return p2p.SendMessage(p.rw, transactionRequestMsgCode, buff)
 }
 
@@ -178,10 +181,6 @@ func (p *peer) SendBlockRequest(blockHash common.Hash) error {
 
 func (p *peer) sendTransactions(txs []*types.Transaction) error {
 	buff := common.SerializePanic(txs)
-
-	if common.PrintExplosionLog {
-		p.log.Debug("peer send [transactionsMsgCode] with length %d, size %d byte", len(txs), len(buff))
-	}
 
 	return p2p.SendMessage(p.rw, transactionsMsgCode, buff)
 }
@@ -235,7 +234,12 @@ func (p *peer) sendBlockHeaders(magic uint32, headers []*types.BlockHeader) erro
 	buff := common.SerializePanic(sendMsg)
 
 	p.log.Debug("peer send [downloader.BlockHeadersMsg] with length %d size %d byte peerid:%s", len(headers), len(buff), p.peerStrID)
-	return p2p.SendMessage(p.rw, downloader.BlockHeadersMsg, buff)
+	err := p2p.SendMessage(p.rw, downloader.BlockHeadersMsg, buff)
+	if err != nil {
+		p.log.Error("peer send [downloader.BlockHeadersMsg] err=%s", err)
+	}
+
+	return err
 }
 
 // RequestBlocksByHashOrNumber fetches a batch of blocks corresponding to the
@@ -253,6 +257,10 @@ func (p *peer) RequestBlocksByHashOrNumber(magic uint32, origin common.Hash, num
 	return p2p.SendMessage(p.rw, downloader.GetBlocksMsg, buff)
 }
 
+func (p *peer) GetPeerRequestInfo() (uint32, common.Hash, uint64, int) {
+	return 0, common.EmptyHash, 0, 0
+}
+
 func (p *peer) sendBlocks(magic uint32, blocks []*types.Block) error {
 	sendMsg := &downloader.BlocksMsgBody{
 		Magic:  magic,
@@ -261,7 +269,12 @@ func (p *peer) sendBlocks(magic uint32, blocks []*types.Block) error {
 	buff := common.SerializePanic(sendMsg)
 
 	p.log.Debug("peer send [downloader.BlocksMsg] with length: %d, size:%d byte peerid:%s", len(blocks), len(buff), p.peerStrID)
-	return p2p.SendMessage(p.rw, downloader.BlocksMsg, buff)
+	err := p2p.SendMessage(p.rw, downloader.BlocksMsg, buff)
+	if err != nil {
+		p.log.Error("peer send [downloader.BlocksMsg] err=%s", err)
+	}
+
+	return err
 }
 
 func (p *peer) sendHeadStatus(msg *chainHeadStatus) error {
@@ -272,13 +285,15 @@ func (p *peer) sendHeadStatus(msg *chainHeadStatus) error {
 }
 
 // handShake exchange networkid td etc between two connected peers.
-func (p *peer) handShake(networkID uint64, td *big.Int, head common.Hash, genesis common.Hash) error {
+func (p *peer) handShake(networkID string, td *big.Int, head common.Hash, genesis common.Hash, difficult uint64) error {
 	msg := &statusData{
-		ProtocolVersion: uint32(SeeleVersion),
+		ProtocolVersion: uint32(common.SeeleVersion),
 		NetworkID:       networkID,
 		TD:              td,
 		CurrentBlock:    head,
 		GenesisBlock:    genesis,
+		Shard:           common.LocalShardNumber,
+		Difficult:       difficult,
 	}
 
 	if err := p2p.SendMessage(p.rw, statusDataMsgCode, common.SerializePanic(msg)); err != nil {
@@ -289,6 +304,7 @@ func (p *peer) handShake(networkID uint64, td *big.Int, head common.Hash, genesi
 	if err != nil {
 		return err
 	}
+
 	if retMsg.Code != statusDataMsgCode {
 		return errMsgNotMatch
 	}
@@ -298,11 +314,27 @@ func (p *peer) handShake(networkID uint64, td *big.Int, head common.Hash, genesi
 		return err
 	}
 
-	if retStatusMsg.NetworkID != networkID || retStatusMsg.GenesisBlock != genesis {
-		return errNetworkNotMatch
+	if err = verifyGenesisAndNetworkID(retStatusMsg, genesis, networkID, common.LocalShardNumber, difficult); err != nil {
+		return err
 	}
 
 	p.head = retStatusMsg.CurrentBlock
 	p.td = retStatusMsg.TD
+	return nil
+}
+
+func verifyGenesisAndNetworkID(retStatusMsg statusData, genesis common.Hash, networkID string, shard uint, difficult uint64) error {
+	if retStatusMsg.NetworkID != networkID {
+		return errNetworkNotMatch
+	}
+	if retStatusMsg.Shard == shard {
+		if retStatusMsg.GenesisBlock != genesis {
+			return errGenesisNotMatch
+		}
+	} else {
+		if retStatusMsg.Difficult != difficult {
+			return errGenesisDifficultNotMatch
+		}
+	}
 	return nil
 }

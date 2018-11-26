@@ -7,6 +7,7 @@ package cmd
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/seeleteam/go-seele/common"
@@ -73,7 +74,7 @@ func callContract(contractHexAddr string) {
 	}
 
 	// Create a call message transaction
-	callContractTx, err := types.NewMessageTransaction(from, contractAddr, big.NewInt(0), big.NewInt(1), DefaultNonce, msg)
+	callContractTx, err := types.NewMessageTransaction(from, contractAddr, big.NewInt(0), big.NewInt(1), math.MaxUint64, DefaultNonce, msg)
 	if err != nil {
 		fmt.Println("failed to create message tx,", err.Error())
 		return
@@ -97,9 +98,9 @@ func callContract(contractHexAddr string) {
 
 	for i, log := range receipt.Logs {
 		fmt.Printf("Log[%v]:\n", i)
-		fmt.Println("\taddress:", log.Address.ToHex())
+		fmt.Println("\taddress:", log.Address.Hex())
 		if len(log.Topics) == 1 {
-			fmt.Println("\ttopics:", log.Topics[0].ToHex())
+			fmt.Println("\ttopics:", log.Topics[0].Hex())
 		} else {
 			fmt.Println("\ttopics:", log.Topics)
 		}

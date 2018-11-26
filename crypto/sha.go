@@ -10,22 +10,24 @@ import (
 	"github.com/seeleteam/go-seele/crypto/sha3"
 )
 
-// keccak256Hash calculates and returns the Keccak256 hash of the input data,
-// converting it to an internal Hash data structure.
-func keccak256Hash(data ...[]byte) []byte {
+// Keccak256 calculates and returns the Keccak256 hash of the input data.
+func Keccak256(data ...[]byte) []byte {
 	d := sha3.NewKeccak256()
 	for _, b := range data {
 		d.Write(b)
 	}
+	return d.Sum(nil)
+}
 
-	h := make([]byte, common.HashLength)
-	d.Sum(h[:0])
-	return h
+// Keccak256Hash calculates and returns the Keccak256 hash of the input data,
+// converting it to an internal Hash data structure.
+func Keccak256Hash(data ...[]byte) common.Hash {
+	return common.BytesToHash(Keccak256(data...))
 }
 
 // HashBytes returns the hash of the input data.
 func HashBytes(data ...[]byte) common.Hash {
-	return common.BytesToHash(keccak256Hash(data...))
+	return common.BytesToHash(Keccak256(data...))
 }
 
 // MustHash returns the hash of the specified value.

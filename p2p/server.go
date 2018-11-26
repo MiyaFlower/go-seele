@@ -11,7 +11,6 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -24,6 +23,8 @@ import (
 	"github.com/seeleteam/go-seele/crypto"
 	"github.com/seeleteam/go-seele/log"
 	"github.com/seeleteam/go-seele/p2p/discovery"
+	"github.com/sirupsen/logrus"
+	set "gopkg.in/fatih/set.v0"
 )
 
 const (
@@ -36,7 +37,7 @@ const (
 	defaultDialTimeout = 15 * time.Second
 
 	// Maximum amount of time allowed for writing some bytes, not a complete message, because the message length is very highly variable.
-	connWriteTimeout = 10 * time.Second
+	connWriteTimeout = 30 * time.Second
 
 	// Maximum time allowed for reading a complete message.
 	frameReadTimeout = 30 * time.Second
@@ -44,7 +45,7 @@ const (
 	inboundConn  = 1
 	outboundConn = 2
 
-	// In transfering handshake msg, length of extra data
+	// In transferring handshake msg, length of extra data
 	extraDataLen = 24
 )
 
@@ -54,7 +55,7 @@ type Config struct {
 	ListenAddr string `json:"address"`
 
 	// NetworkID used to define net type, for example main net and test net.
-	NetworkID uint64 `json:"networkID"`
+	NetworkID string `json:"networkID"`
 
 	// static nodes which will be connected to find more nodes when the node started
 	StaticNodes []*discovery.Node `json:"staticNodes"`
@@ -63,7 +64,7 @@ type Config struct {
 	SubPrivateKey string `json:"privateKey"`
 
 	// PrivateKey private key for p2p module, do not use it as any accounts
-	PrivateKey *ecdsa.PrivateKey
+	PrivateKey *ecdsa.PrivateKey `json:"-"`
 }
 
 // Server manages all p2p peer connections.
@@ -99,10 +100,19 @@ type Server struct {
 	SelfNode *discovery.Node
 
 	genesis core.GenesisInfo
+
+	// genesisHash is used for handshake
+	genesisHash common.Hash
 }
 
 // NewServer initialize a server
 func NewServer(genesis core.GenesisInfo, config Config, protocols []Protocol) *Server {
+	// add genesisHash with shard set to 0 to calculate hash
+	shard := genesis.ShardNumber
+	genesis.ShardNumber = 0
+	hash := genesis.Hash()
+	genesis.ShardNumber = shard
+
 	return &Server{
 		Config:          config,
 		running:         false,
@@ -113,6 +123,7 @@ func NewServer(genesis core.GenesisInfo, config Config, protocols []Protocol) *S
 		MaxPendingPeers: 0,
 		Protocols:       protocols,
 		genesis:         genesis,
+		genesisHash:     hash,
 	}
 }
 
@@ -151,7 +162,30 @@ func (srv *Server) Start(nodeDir string, shard uint) (err error) {
 	srv.loopWG.Add(1)
 	go srv.run()
 	srv.running = true
+
+	// just in debug mode
+	if srv.log.GetLevel() >= logrus.DebugLevel {
+		go srv.printPeers()
+	}
+
 	return nil
+}
+
+// printPeers used print handshake peers log, not just in debug
+func (srv *Server) printPeers() {
+	timer := time.NewTimer(1 * time.Hour)
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+loop:
+	for {
+		select {
+		case <-ticker.C:
+			srv.log.Debug("handshake peers number: %d, time: %d", srv.PeerCount(), time.Now().UnixNano())
+		case <-timer.C:
+			break loop
+		}
+	}
 }
 
 func (srv *Server) addNode(node *discovery.Node) {
@@ -255,9 +289,12 @@ running:
 	}
 
 	// Disconnect all peers.
-	srv.peerSet.foreach(func(p *Peer) {
-		p.Disconnect(discServerQuit)
-	})
+	peers := srv.peerSet.getPeers()
+	for _, peer := range peers {
+		if peer != nil {
+			peer.Disconnect(discServerQuit)
+		}
+	}
 }
 
 func (srv *Server) startListening() error {
@@ -328,12 +365,13 @@ func (srv *Server) listenLoop() {
 // Assume the inbound side is server side; outbound side is client side.
 func (srv *Server) setupConn(fd net.Conn, flags int, dialDest *discovery.Node) error {
 	srv.log.Info("setup connection with peer %s", dialDest)
-	peer := NewPeer(&connection{fd: fd}, srv.Protocols, srv.log, dialDest)
+	peer := NewPeer(&connection{fd: fd, log: srv.log}, srv.log, dialDest)
 	var caps []Cap
 	for _, proto := range srv.Protocols {
 		caps = append(caps, proto.cap())
 	}
 
+	sort.Sort(capsByNameAndVersion(caps))
 	recvMsg, _, err := srv.doHandShake(caps, peer, flags, dialDest)
 	if err != nil {
 		srv.log.Info("failed to do handshake with peer %s, err info %s", dialDest, err)
@@ -351,7 +389,7 @@ func (srv *Server) setupConn(fd net.Conn, flags int, dialDest *discovery.Node) e
 			return errors.New("not found nodeID in discovery database")
 		}
 
-		srv.log.Info("p2p.setupConn peerNodeID found in nodeMap. %s", peerNode.ID.ToHex())
+		srv.log.Info("p2p.setupConn peerNodeID found in nodeMap. %s", peerNode.ID.Hex())
 		peer.Node = peerNode
 	}
 
@@ -370,53 +408,46 @@ func (srv *Server) setupConn(fd net.Conn, flags int, dialDest *discovery.Node) e
 	return nil
 }
 
-func (srv *Server) peerIsValidate(recvMsg *ProtoHandShake) bool {
-	var genesis core.GenesisInfo
-	err := json.Unmarshal(recvMsg.Params, &genesis)
-	if err != nil {
-		return false
-	}
-
-	for key, val := range genesis.Accounts {
-		v, ok := srv.genesis.Accounts[key]
-		if !ok {
-			return false
-		}
-		if val.Cmp(v) != 0 {
-			return false
-		}
+func (srv *Server) peerIsValidate(recvMsg *ProtoHandShake) ([]Cap, bool) {
+	// validate hash of genesisHash without shard
+	if !bytes.Equal(srv.genesisHash.Bytes(), recvMsg.Params) {
+		return nil, false
 	}
 
 	if srv.Config.NetworkID != recvMsg.NetworkID {
-		return false
+		return nil, false
 	}
 
-	var caps []Cap
+	localCapSet := set.New()
 	for _, proto := range srv.Protocols {
-		caps = append(caps, proto.cap())
-	}
-	if len(caps) != len(recvMsg.Caps) {
-		return false
+		localCapSet.Add(proto.cap())
 	}
 
-	var str string
-	var tag = true
-	len := len(caps)
-	for i := 0; i < len; i++ {
-		str = caps[i].String()
-		for j := 0; j < len; j++ {
-			if recvMsg.Caps[j].String() != str {
-				tag = false
-				continue
-			}
-			tag = true
-			break
-		}
-		if !tag {
-			break
+	var capNameList []Cap
+	for _, cap := range recvMsg.Caps {
+		if localCapSet.Has(cap) {
+			capNameList = append(capNameList, cap)
 		}
 	}
-	return tag
+
+	if len(capNameList) == 0 {
+		return nil, false
+	}
+
+	return capNameList, true
+}
+
+func (srv *Server) getProtocolsByCaps(capList []Cap) (proList []Protocol) {
+	for _, cap := range capList {
+		for _, pro := range srv.Protocols {
+			if pro.cap().String() == cap.String() {
+				proList = append(proList, pro)
+				break
+			}
+		}
+	}
+
+	return
 }
 
 // doHandShake Communicate each other
@@ -424,11 +455,7 @@ func (srv *Server) doHandShake(caps []Cap, peer *Peer, flags int, dialDest *disc
 	var renounceCnt uint64
 	handshakeMsg := &ProtoHandShake{Caps: caps}
 	handshakeMsg.NetworkID = srv.Config.NetworkID
-	params, err := json.Marshal(srv.genesis)
-	if err != nil {
-		return nil, 0, err
-	}
-	handshakeMsg.Params = params
+	handshakeMsg.Params = srv.genesisHash.Bytes()
 	nodeID := srv.SelfNode.ID
 	copy(handshakeMsg.NodeID[0:], nodeID[0:])
 	if flags == outboundConn {
@@ -438,40 +465,58 @@ func (srv *Server) doHandShake(caps []Cap, peer *Peer, flags int, dialDest *disc
 		if err != nil {
 			return nil, 0, err
 		}
+
 		if err = peer.rw.WriteMsg(wrapMsg); err != nil {
 			return nil, 0, err
 		}
+
 		recvWrapMsg, err := peer.rw.ReadMsg()
 		if err != nil {
 			return nil, 0, err
 		}
+
 		recvMsg, renounceCnt, err = srv.unPackWrapHSMsg(recvWrapMsg)
 		if err != nil {
 			return nil, 0, err
 		}
+
 		if renounceCnt != nounceCnt {
 			return nil, 0, errors.New("client nounceCnt is changed")
 		}
-		if !srv.peerIsValidate(recvMsg) {
+
+		capList, bValid := srv.peerIsValidate(recvMsg)
+		if !bValid {
 			return nil, 0, errors.New("node is not consitent with groups")
 		}
+
+		sort.Sort(capsByNameAndVersion(capList))
+		peer.setProtocols(srv.getProtocolsByCaps(capList))
+
 	} else {
 		// server side. Receive handshake msg first
 		recvWrapMsg, err := peer.rw.ReadMsg()
 		if err != nil {
 			return nil, 0, err
 		}
+
 		recvMsg, nounceCnt, err = srv.unPackWrapHSMsg(recvWrapMsg)
 		if err != nil {
 			return nil, 0, err
 		}
-		if !srv.peerIsValidate(recvMsg) {
+
+		capList, bValid := srv.peerIsValidate(recvMsg)
+		if !bValid {
 			return nil, 0, errors.New("node is not consitent with groups")
 		}
+
+		sort.Sort(capsByNameAndVersion(capList))
+		peer.setProtocols(srv.getProtocolsByCaps(capList))
+
 		wrapMsg, err := srv.packWrapHSMsg(handshakeMsg, recvMsg.NodeID[0:], nounceCnt)
 		if err != nil {
 			return nil, 0, err
 		}
+
 		if err = peer.rw.WriteMsg(wrapMsg); err != nil {
 			return nil, 0, err
 		}
@@ -586,13 +631,16 @@ func (p PeerInfos) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 // PeersInfo returns an array of metadata objects describing connected peers.
 func (srv *Server) PeersInfo() []PeerInfo {
 	infos := make([]PeerInfo, 0, srv.PeerCount())
-	srv.peerSet.foreach(func(peer *Peer) {
-		if peer != nil {
-			peerInfo := peer.Info()
+	peers := srv.peerSet.getPeers()
+
+	for _, p := range peers {
+		if p != nil {
+			peerInfo := p.Info()
 			infos = append(infos, *peerInfo)
 		}
-	})
+	}
 
 	sort.Sort(PeerInfos(infos))
+
 	return infos
 }

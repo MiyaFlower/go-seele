@@ -19,6 +19,7 @@ import (
 	"github.com/seeleteam/go-seele/common"
 	"github.com/seeleteam/go-seele/crypto"
 	"github.com/seeleteam/go-seele/log"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -65,14 +66,14 @@ type pending struct {
 }
 
 type send struct {
-	toId   common.Address
+	toID   common.Address
 	toAddr *net.UDPAddr
 	buff   []byte
 	code   msgType
 }
 
 type reply struct {
-	fromId   common.Address
+	fromID   common.Address
 	fromAddr *net.UDPAddr
 	code     msgType
 
@@ -107,7 +108,7 @@ func newUDP(id common.Address, addr *net.UDPAddr, shard uint) *udp {
 	return transport
 }
 
-func (u *udp) sendMsg(t msgType, msg interface{}, toId common.Address, toAddr *net.UDPAddr) {
+func (u *udp) sendMsg(t msgType, msg interface{}, toID common.Address, toAddr *net.UDPAddr) {
 	encoding, err := common.Serialize(msg)
 	if err != nil {
 		u.log.Info(err.Error())
@@ -117,7 +118,7 @@ func (u *udp) sendMsg(t msgType, msg interface{}, toId common.Address, toAddr *n
 	buff := generateBuff(t, encoding)
 	s := &send{
 		buff:   buff,
-		toId:   toId,
+		toID:   toID,
 		toAddr: toAddr,
 		code:   t,
 	}
@@ -147,7 +148,7 @@ func (u *udp) sendLoop() {
 			success := u.sendConnMsg(s.buff, u.conn, s.toAddr)
 			if !success {
 				r := &reply{
-					fromId:   s.toId,
+					fromID:   s.toID,
 					fromAddr: s.toAddr,
 					code:     s.code,
 					err:      true,
@@ -163,9 +164,6 @@ func (u *udp) handleMsg(from *net.UDPAddr, data []byte) {
 	if len(data) > 0 {
 		code := byteToMsgType(data[0])
 
-		if common.PrintExplosionLog {
-			u.log.Debug("receive msg type: %s", codeToStr(code))
-		}
 		switch code {
 		case pingMsgType:
 			msg := &ping{}
@@ -186,7 +184,7 @@ func (u *udp) handleMsg(from *net.UDPAddr, data []byte) {
 			}
 
 			r := &reply{
-				fromId:   msg.SelfID,
+				fromID:   msg.SelfID,
 				fromAddr: from,
 				code:     code,
 				data:     msg,
@@ -214,7 +212,7 @@ func (u *udp) handleMsg(from *net.UDPAddr, data []byte) {
 			}
 
 			r := &reply{
-				fromId:   msg.SelfID,
+				fromID:   msg.SelfID,
 				fromAddr: from,
 				code:     code,
 				data:     msg,
@@ -240,7 +238,7 @@ func (u *udp) handleMsg(from *net.UDPAddr, data []byte) {
 			}
 
 			r := &reply{
-				fromId:   msg.SelfID,
+				fromID:   msg.SelfID,
 				fromAddr: from,
 				code:     code,
 				data:     msg,
@@ -349,7 +347,7 @@ func (u *udp) discovery() {
 
 		nodes := u.table.findNodeForRequest(crypto.HashBytes(id.Bytes()))
 
-		u.log.Debug("query node with id: %s", id.ToHex())
+		u.log.Debug("query node with id: %s", id.Hex())
 		sendFindNodeRequest(u, nodes, *id)
 
 		concurrentCount := 0
@@ -446,6 +444,26 @@ func (u *udp) StartServe(nodeDir string) {
 	go u.pingPongService()
 	go u.sendLoop()
 	go u.db.StartSaveNodes(nodeDir, make(chan struct{}))
+	if u.log.GetLevel() >= logrus.DebugLevel {
+		go u.printPeers()
+	}
+}
+
+// printPeers print log during 60 minutes, note this is in debug
+func (u *udp) printPeers() {
+	timer := time.NewTimer(3600 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+loop:
+	for {
+		select {
+		case <-ticker.C:
+			u.log.Debug("discovery peers number: %d, time: %d", u.table.count(), time.Now().UnixNano())
+		case <-timer.C:
+			break loop
+		}
+	}
 }
 
 // only notify connect when got pong msg
@@ -477,7 +495,7 @@ func (u *udp) deleteNode(n *Node) {
 		return
 	}
 
-	idStr := n.ID.ToHex()
+	idStr := n.ID.Hex()
 	var count = 0
 	value, ok := u.timeoutNodesCount.Get(idStr)
 	if ok {
@@ -501,7 +519,7 @@ func (u *udp) loadNodes(nodeDir string) {
 	fileFullPath := filepath.Join(nodeDir, NodesBackupFileName)
 
 	if !common.FileOrFolderExists(fileFullPath) {
-		u.log.Debug("nodes info backup file isn't exists in the path:%s", fileFullPath)
+		u.log.Debug("nodes info backup file doesn't exist in the path:%s", fileFullPath)
 		return
 	}
 

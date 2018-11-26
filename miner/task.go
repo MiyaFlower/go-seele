@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/seeleteam/go-seele/common"
+	"github.com/seeleteam/go-seele/consensus"
 	"github.com/seeleteam/go-seele/core"
 	"github.com/seeleteam/go-seele/core/state"
 	"github.com/seeleteam/go-seele/core/types"
 	"github.com/seeleteam/go-seele/log"
-	"github.com/seeleteam/go-seele/miner/pow"
 )
 
 // Task is a mining work for engine, containing block header, transactions, and transaction receipts.
@@ -24,23 +24,26 @@ type Task struct {
 	receipts []*types.Receipt
 	debts    []*types.Debt
 
-	createdAt time.Time
-	coinbase  common.Address
+	createdAt    time.Time
+	coinbase     common.Address
+	debtVerifier types.DebtVerifier
 }
 
 // applyTransactionsAndDebts TODO need to check more about the transactions, such as gas limit
 func (task *Task) applyTransactionsAndDebts(seele SeeleBackend, statedb *state.Statedb, log *log.SeeleLog) error {
+	// choose transactions from the given txs
+	size := task.chooseDebts(seele, statedb, log)
+
 	// the reward tx will always be at the first of the block's transactions
 	reward, err := task.handleMinerRewardTx(statedb)
 	if err != nil {
 		return err
 	}
 
-	// choose transactions from the given txs
-	size := task.chooseDebts(seele, statedb, log)
 	task.chooseTransactions(seele, statedb, log, size)
 
-	log.Info("mining block height:%d, reward:%s, transaction number:%d", task.header.Height, reward, len(task.txs))
+	log.Info("mining block height:%d, reward:%s, transaction number:%d, debt number: %d",
+		task.header.Height, reward, len(task.txs), len(task.debts))
 
 	root, err := statedb.Hash()
 	if err != nil {
@@ -55,32 +58,42 @@ func (task *Task) applyTransactionsAndDebts(seele SeeleBackend, statedb *state.S
 func (task *Task) chooseDebts(seele SeeleBackend, statedb *state.Statedb, log *log.SeeleLog) int {
 	size := core.BlockByteLimit
 
-	var debts []*types.Debt
+	var recoverableDebts []*types.Debt
 	for size > 0 {
-		debts, size = seele.DebtPool().Get(size)
+		debts, _ := seele.DebtPool().GetProcessableDebts(size)
 		if len(debts) == 0 {
-			return size
+			break
 		}
 
 		for _, d := range debts {
-			// @TODO validate debt
+			recoverable, err := core.ApplyDebt(statedb, d, task.coinbase, task.debtVerifier)
+			if err != nil {
+				if recoverable {
+					log.Info("apply debt recoverable error %s", err)
+					recoverableDebts = append(recoverableDebts, d)
+				} else {
+					log.Warn("apply debt error %s", err)
+					seele.DebtPool().RemoveDebtByHash(d.Hash)
+				}
 
-			// @TODO add debt reward
-
-			if !statedb.Exist(d.Data.Account) {
-				statedb.CreateAccount(d.Data.Account)
+				continue
 			}
 
-			statedb.AddBalance(d.Data.Account, d.Data.Amount)
+			size = size - d.Size()
+			task.debts = append(task.debts, d)
 		}
 	}
 
+	if len(recoverableDebts) > 0 {
+		// add recoverable debts back to debt pool
+		seele.DebtPool().AddBackDebts(recoverableDebts)
+	}
 	return size
 }
 
 // handleMinerRewardTx handles the miner reward transaction.
 func (task *Task) handleMinerRewardTx(statedb *state.Statedb) (*big.Int, error) {
-	reward := pow.GetReward(task.header.Height)
+	reward := consensus.GetReward(task.header.Height)
 	rewardTx, err := types.NewRewardTransaction(task.coinbase, reward, task.header.CreateTimestamp.Uint64())
 	if err != nil {
 		return nil, err
@@ -111,7 +124,7 @@ func (task *Task) chooseTransactions(seele SeeleBackend, statedb *state.Statedb,
 		for _, tx := range txs {
 			if err := tx.Validate(statedb); err != nil {
 				seele.TxPool().RemoveTransaction(tx.Hash)
-				log.Error("failed to validate tx %s, for %s", tx.Hash.ToHex(), err)
+				log.Error("failed to validate tx %s, for %s", tx.Hash.Hex(), err)
 				txsSize = txsSize - tx.Size()
 				continue
 			}
@@ -119,7 +132,7 @@ func (task *Task) chooseTransactions(seele SeeleBackend, statedb *state.Statedb,
 			receipt, err := seele.BlockChain().ApplyTransaction(tx, txIndex, task.coinbase, statedb, task.header)
 			if err != nil {
 				seele.TxPool().RemoveTransaction(tx.Hash)
-				log.Error("failed to apply tx %s, %s", tx.Hash.ToHex(), err)
+				log.Error("failed to apply tx %s, %s", tx.Hash.Hex(), err)
 				txsSize = txsSize - tx.Size()
 				continue
 			}

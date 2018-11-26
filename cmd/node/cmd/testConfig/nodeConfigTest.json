@@ -4,7 +4,8 @@
     "version": "1.0",
     "dataDir": "node2",
     "address": "0.0.0.0:55028",
-    "coinbase": "0x954e4e062eb4bb2dcd93becf4f4e9b1d2d69f136"
+    "coinbase": "0x954e4e062eb4bb2dcd93becf4f4e9b1d2d69f131",
+    "syncMode": "full"
   },
   "p2p": {
     "address": "0.0.0.0:39008",
@@ -13,7 +14,7 @@
       "127.0.0.1:39007",
       "127.0.0.1:39008"
     ],
-    "networkID": 1
+    "networkID": "seele"
   },
   "log": {
     "isDebug": true,
@@ -30,6 +31,7 @@
   },
   "genesis": {
     "difficult":22,
-    "shard":12
+    "shard":1,
+    "timestamp":1539742676
   }
 }

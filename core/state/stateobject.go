@@ -6,11 +6,11 @@
 package state
 
 import (
+	"bytes"
 	"math/big"
 
 	"github.com/seeleteam/go-seele/common"
 	"github.com/seeleteam/go-seele/crypto"
-	"github.com/seeleteam/go-seele/trie"
 )
 
 var (
@@ -122,7 +122,7 @@ func (s *stateObject) addAmount(amount *big.Int) {
 	s.setAmount(new(big.Int).Add(s.account.Amount, amount))
 }
 
-// subAmount substracts the specified amount from the balance of the account in the state object
+// subAmount subtracts the specified amount from the balance of the account in the state object
 func (s *stateObject) subAmount(amount *big.Int) {
 	s.setAmount(new(big.Int).Sub(s.account.Amount, amount))
 }
@@ -132,10 +132,10 @@ func (s *stateObject) dataKey(dataType byte, prefix ...byte) []byte {
 	return append(key, prefix...)
 }
 
-func (s *stateObject) loadAccount(trie *trie.Trie) (bool, error) {
-	value, ok := trie.Get(s.dataKey(dataTypeAccount))
-	if !ok {
-		return false, nil
+func (s *stateObject) loadAccount(trie Trie) (bool, error) {
+	value, ok, err := trie.Get(s.dataKey(dataTypeAccount))
+	if err != nil || !ok {
+		return false, err
 	}
 
 	if err := common.Deserialize(value, &s.account); err != nil {
@@ -145,26 +145,26 @@ func (s *stateObject) loadAccount(trie *trie.Trie) (bool, error) {
 	return true, nil
 }
 
-func (s *stateObject) loadCode(trie *trie.Trie) []byte {
+func (s *stateObject) loadCode(trie Trie) ([]byte, error) {
 	// already loaded
 	if s.code != nil {
-		return s.code
+		return s.code, nil
 	}
 
 	// no code
 	if len(s.account.CodeHash) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// load code from trie
-	code, ok := trie.Get(s.dataKey(dataTypeCode))
-	if !ok {
-		return nil
+	code, ok, err := trie.Get(s.dataKey(dataTypeCode))
+	if err != nil || !ok {
+		return nil, err
 	}
 
 	s.code = code
 
-	return code
+	return code, nil
 }
 
 func (s *stateObject) setCode(code []byte) {
@@ -186,27 +186,42 @@ func (s *stateObject) empty() bool {
 }
 
 func (s *stateObject) setState(key common.Hash, value []byte) {
-	s.cachedStorage[key] = value
 	s.dirtyStorage[key] = value
 }
 
-func (s *stateObject) getState(trie *trie.Trie, key common.Hash) []byte {
+func (s *stateObject) getState(trie Trie, key common.Hash, committed bool) ([]byte, error) {
+	if !committed {
+		if value, ok := s.dirtyStorage[key]; ok {
+			return value, nil
+		}
+	}
+
 	if value, ok := s.cachedStorage[key]; ok {
-		return value
+		return value, nil
 	}
 
-	if value, ok := trie.Get(s.dataKey(dataTypeStorage, crypto.MustHash(key).Bytes()...)); ok {
-		return value
+	value, ok, err := trie.Get(s.dataKey(dataTypeStorage, crypto.MustHash(key).Bytes()...))
+	if err != nil || !ok {
+		return nil, err
 	}
 
-	return nil
+	s.cachedStorage[key] = value
+
+	return value, nil
 }
 
 // flush update the dirty data of state object to the specified trie if any.
-func (s *stateObject) flush(trie *trie.Trie) error {
+func (s *stateObject) flush(trie Trie) error {
 	// Flush storage change.
 	if len(s.dirtyStorage) > 0 {
 		for k, v := range s.dirtyStorage {
+			// value cached and not changed.
+			if cachedValue, ok := s.cachedStorage[k]; ok && bytes.Equal(cachedValue, v) {
+				continue
+			}
+
+			s.cachedStorage[k] = v
+
 			if err := trie.Put(s.dataKey(dataTypeStorage, crypto.MustHash(k).Bytes()...), v); err != nil {
 				return err
 			}

@@ -10,43 +10,45 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/seeleteam/go-seele/api"
 	"github.com/seeleteam/go-seele/common"
 	"github.com/seeleteam/go-seele/core/types"
 	"github.com/seeleteam/go-seele/crypto"
-	"github.com/seeleteam/go-seele/rpc2"
-	"github.com/seeleteam/go-seele/seele"
+	"github.com/seeleteam/go-seele/rpc"
 )
 
 // GetAccountNonce get account nonce by account
-func GetAccountNonce(client *rpc.Client, account common.Address) (uint64, error) {
+func GetAccountNonce(client *rpc.Client, account common.Address, hexHash string, height int64) (uint64, error) {
 	var nonce uint64
-	err := client.Call(&nonce, "seele_getAccountNonce", account)
+	err := client.Call(&nonce, "seele_getAccountNonce", account, hexHash, height)
+
 	return nonce, err
 }
 
-func GetInfo(client *rpc.Client) (seele.MinerInfo, error) {
-	var info seele.MinerInfo
+func GetInfo(client *rpc.Client) (api.GetMinerInfo, error) {
+	var info api.GetMinerInfo
 	err := client.Call(&info, "seele_getInfo")
 
 	return info, err
 }
 
-func GenerateTx(from *ecdsa.PrivateKey, to common.Address, amount *big.Int, fee *big.Int, nonce uint64, payload []byte) (*types.Transaction, error) {
+// GenerateTx generate a transaction based on the address type of to
+func GenerateTx(from *ecdsa.PrivateKey, to common.Address, amount *big.Int, price *big.Int, gasLimit uint64, nonce uint64, payload []byte) (*types.Transaction, error) {
 	fromAddr := crypto.GetAddress(&from.PublicKey)
 
 	var tx *types.Transaction
 	var err error
 	if to.IsEmpty() {
-		tx, err = types.NewContractTransaction(*fromAddr, amount, fee, nonce, payload)
+		tx, err = types.NewContractTransaction(*fromAddr, amount, price, gasLimit, nonce, payload)
 	} else {
 		switch to.Type() {
 		case common.AddressTypeExternal:
-			tx, err = types.NewTransaction(*fromAddr, to, amount, fee, nonce)
-		case common.AddressTypeContract:
-			tx, err = types.NewMessageTransaction(*fromAddr, to, amount, fee, nonce, payload)
+			// always ignore the user input gas limit for transfer amount tx.
+			tx, err = types.NewTransaction(*fromAddr, to, amount, price, nonce)
+		case common.AddressTypeContract, common.AddressTypeReserved:
+			tx, err = types.NewMessageTransaction(*fromAddr, to, amount, price, gasLimit, nonce, payload)
 		default:
 			return nil, fmt.Errorf("unsupported address type: %d", to.Type())
-
 		}
 	}
 
@@ -69,4 +71,20 @@ func SendTx(client *rpc.Client, tx *types.Transaction) (bool, error) {
 	err := client.Call(&result, "seele_addTx", *tx)
 
 	return result, err
+}
+
+// CallContract call contract
+func CallContract(client *rpc.Client, contractID, payLoad string, height int64) (map[string]interface{}, error) {
+	var info map[string]interface{}
+	err := client.Call(&info, "seele_call", contractID, payLoad, height)
+
+	return info, err
+}
+
+// GetNetworkID get network ID
+func GetNetworkID(client *rpc.Client) (string, error) {
+	var networkID string
+	err := client.Call(&networkID, "network_getNetworkID")
+
+	return networkID, err
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/seeleteam/go-seele/common"
 	"github.com/seeleteam/go-seele/log"
 	"github.com/seeleteam/go-seele/p2p"
-	rpc "github.com/seeleteam/go-seele/rpc2"
+	rpc "github.com/seeleteam/go-seele/rpc"
 )
 
 // error infos
@@ -49,8 +49,11 @@ type Node struct {
 	log  *log.SeeleLog
 	lock sync.RWMutex
 
-	rpcListener net.Listener // IPC RPC listener socket to serve API requests
-	rpcHandler  *rpc.Server  // IPC RPC request handler to process the API requests
+	tcpListener net.Listener // TCP RPC listener socket to serve API requests
+	tcpHandler  *rpc.Server  // TCP RPC request handler to process the API requests
+
+	ipcListener net.Listener // IPC RPC listener socket to serve API requests
+	ipcHandler  *rpc.Server  // IPC RPC request handler to process the API requests
 
 	httpEndpoint string       // HTTP endpoint (interface + port) to listen at (empty = HTTP disabled)
 	httpListener net.Listener // HTTP RPC listener socket to serve API requests
@@ -59,6 +62,8 @@ type Node struct {
 	wsEndpoint string       // Websocket endpoint (interface + port) to listen at (empty = websocket disabled)
 	wsListener net.Listener // Websocket RPC listener socket to serve API requests
 	wsHandler  *rpc.Server  // Websocket RPC request handler to process the API requests
+
+	shard uint
 }
 
 // New creates a new P2P node.
@@ -67,11 +72,22 @@ func New(conf *Config) (*Node, error) {
 	conf = &confCopy
 	nlog := log.GetLogger("node")
 
-	return &Node{
+	node := &Node{
 		config:   conf,
 		services: []Service{},
 		log:      nlog,
-	}, nil
+	}
+
+	err := node.checkConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	return node, nil
+}
+
+func (n *Node) GetShardNumber() uint {
+	return n.shard
 }
 
 // Register appends a new service into the node's stack.
@@ -92,24 +108,19 @@ func (n *Node) Start() error {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 
-	// 1. Check node status
+	// Check node status
 	if n.server != nil {
 		return ErrNodeRunning
 	}
 
-	// 2. Check configurations
-	if err := n.checkConfig(); err != nil {
-		return err
-	}
-
-	// 3. Start p2p server
+	// Start p2p server
 	p2pServer, err := n.startP2PServer()
 	if err != nil {
 		return err
 	}
 	n.server = p2pServer
 
-	// 4. Start services
+	// Start services
 	for _, service := range n.services {
 		if err := service.Start(p2pServer); err != nil {
 			n.log.Error("got error when start service %s", err)
@@ -119,7 +130,7 @@ func (n *Node) Start() error {
 		}
 	}
 
-	// 5. Start RPC server
+	// Start RPC server
 	if err := n.startRPC(n.services); err != nil {
 		n.log.Error("got error when start rpc %s", err)
 		n.stopAllServices()
@@ -141,12 +152,13 @@ func (n *Node) checkConfig() error {
 		return fmt.Errorf("unsupported shard number, it must be in range [0, %d]", common.ShardCount)
 	}
 
-	common.LocalShardNumber = specificShard
+	common.LocalShardNumber = specificShard // @todo remove LocalShardNumber
+	n.shard = specificShard
 	n.log.Info("local shard number is %d", common.LocalShardNumber)
 
 	if !n.config.SeeleConfig.Coinbase.Equal(common.Address{}) {
 		coinbaseShard := n.config.SeeleConfig.Coinbase.Shard()
-		n.log.Info("coinbase is %s", n.config.SeeleConfig.Coinbase.ToHex())
+		n.log.Info("coinbase is %s", n.config.SeeleConfig.Coinbase.Hex())
 
 		if coinbaseShard != specificShard {
 			return fmt.Errorf("coinbase does not match with specific shard number, "+

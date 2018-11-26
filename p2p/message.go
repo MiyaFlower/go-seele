@@ -21,7 +21,12 @@ const (
 	ctlMsgPongCode       uint16 = 4
 )
 
-const zipBytesLimit = 100 * 1024
+const (
+	unZipFlag byte = iota
+	zipFlag
+
+	zipBytesLimit = 100 * 1024
+)
 
 // Message exposed for high level layer to receive
 type Message struct {
@@ -43,18 +48,20 @@ func SendMessage(writer MsgWriter, code uint16, payload []byte) error {
 // Zip compress message when the length of payload is greater than zipBytesLimit
 func (msg *Message) Zip() error {
 	if len(msg.Payload) <= zipBytesLimit {
+		if len(msg.Payload) > 0 {
+			msg.Payload = append([]byte{unZipFlag}, msg.Payload...)
+		}
 		return nil
 	}
 
 	buf := new(bytes.Buffer)
-
 	writer := gzip.NewWriter(buf)
 	_, err := writer.Write(msg.Payload)
 	writer.Close()
 	if err != nil {
 		return err
 	}
-	msg.Payload = buf.Bytes()
+	msg.Payload = append([]byte{zipFlag}, buf.Bytes()...)
 
 	return nil
 }
@@ -62,6 +69,12 @@ func (msg *Message) Zip() error {
 // UnZip the message whether it is compressed or not.
 func (msg *Message) UnZip() error {
 	if len(msg.Payload) == 0 {
+		return nil
+	}
+
+	zipFlag := msg.Payload[0]
+	msg.Payload = msg.Payload[1:]
+	if zipFlag == unZipFlag {
 		return nil
 	}
 
@@ -90,14 +103,16 @@ type ProtoHandShake struct {
 	Caps      []Cap
 	NodeID    common.Address
 	Params    []byte
-	NetworkID uint64
+	NetworkID string
 }
 
+// MsgReader interface
 type MsgReader interface {
 	// ReadMsg read a message. It will block until send the message out or get errors
 	ReadMsg() (*Message, error)
 }
 
+// MsgWriter interface
 type MsgWriter interface {
 	// WriteMsg sends a message. It will block until the message's
 	// Payload has been consumed by the other end.

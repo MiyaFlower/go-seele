@@ -24,9 +24,7 @@ func NewPrivateMinerAPI(s *SeeleService) *PrivateMinerAPI {
 }
 
 // Start API is used to start the miner with the given number of threads.
-func (api *PrivateMinerAPI) Start(threads uint) (bool, error) {
-	api.s.miner.SetThreads(threads)
-
+func (api *PrivateMinerAPI) Start() (bool, error) {
 	if api.s.miner.IsMining() {
 		return true, miner.ErrMinerIsRunning
 	}
@@ -38,9 +36,9 @@ func (api *PrivateMinerAPI) Start(threads uint) (bool, error) {
 func (api *PrivateMinerAPI) Status() (string, error) {
 	if api.s.miner.IsMining() {
 		return "Running", nil
-	} else {
-		return "Stopped", nil
 	}
+
+	return "Stopped", nil
 }
 
 // Stop API is used to stop the miner.
@@ -53,28 +51,14 @@ func (api *PrivateMinerAPI) Stop() (bool, error) {
 	return true, nil
 }
 
-// Hashrate returns the POW hashrate.
-func (api *PrivateMinerAPI) Hashrate() (uint64, error) {
-	if !api.s.miner.IsMining() {
-		return 0, miner.ErrMinerIsStopped
-	}
-
-	return uint64(api.s.miner.Hashrate()), nil
-}
-
 // SetThreads  API is used to set the number of threads.
-func (api *PrivateMinerAPI) SetThreads(threads uint) (bool, error) {
+func (api *PrivateMinerAPI) SetThreads(threads int) (bool, error) {
 	if threads < 0 {
-		return false, errors.New("threads should be greater than zero.")
+		return false, errors.New("threads should be greater than zero")
 	}
 
 	api.s.miner.SetThreads(threads)
 	return true, nil
-}
-
-// GetThreads  API is used to get the number of threads.
-func (api *PrivateMinerAPI) GetThreads() (int, error) {
-	return api.s.miner.GetThreads(), nil
 }
 
 // SetCoinbase API is used to set the coinbase.

@@ -4,7 +4,8 @@
     "version": "1.0",
     "dataDir": "node3",
     "address": "0.0.0.0:8029",
-    "coinbase": "0x7222f89b38277d782fbd2a55736450cc1e4be631"
+    "coinbase": "0x7222f89b38277d782fbd2a55736450cc1e4be631",
+    "algorithm": "sha256"
   },
   "p2p": {
     "address": "0.0.0.0:8059",
@@ -12,14 +13,14 @@
     "staticNodes": [
       "127.0.0.1:8057"
     ],
-    "networkID": 1
+    "networkID": "seele"
   },
   "log": {
-    "isDebug": false,
+    "isDebug": true,
     "printLog": true
   },
   "httpServer": {
-    "address": "127.0.0.1:8039",
+    "address": "0.0.0.0:8039",
     "crossorigins": [
       "*"
     ],
@@ -28,20 +29,24 @@
     ]
   },
   "wsserver": {
-    "address": "127.0.0.1:8049",
+    "address": "0.0.0.0:8049",
     "crossorigins": [
       "*"
     ]
   },
+  "ipcconfig": {
+    "name": "seele3.ipc"
+  },
   "metrics": {
-    "address": "127.0.0.1:8087",
+    "address": "0.0.0.0:8087",
     "duration": 10,
     "database": "influxdb",
     "username": "test",
     "password": "test123"
   },
   "genesis": {
-    "difficult":8000000,
-    "shard":2
+    "difficult":6000000,
+    "shard":2,
+    "timestamp":1539742676
   }
 }

@@ -8,10 +8,14 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/seeleteam/go-seele/common"
+	"github.com/seeleteam/go-seele/consensus/factory"
 	"github.com/seeleteam/go-seele/core"
 	"github.com/seeleteam/go-seele/crypto"
 	"github.com/seeleteam/go-seele/log"
@@ -28,14 +32,15 @@ func getTmpConfig() *node.Config {
 			TxConf:   *core.DefaultTxPoolConfig(),
 			Coinbase: *acctAddr,
 			GenesisConfig: core.GenesisInfo{
-				Difficult:   1,
-				ShardNumber: 1,
+				Difficult:       1,
+				ShardNumber:     1,
+				CreateTimestamp: big.NewInt(0),
 			},
 		},
 	}
 }
 
-func createTestAPI(t *testing.T) *PublicMonitorAPI {
+func createTestAPI(t *testing.T) (api *PublicMonitorAPI, dispose func()) {
 	conf := getTmpConfig()
 	key, _ := crypto.GenerateKey()
 	testConf := node.Config{
@@ -57,24 +62,23 @@ func createTestAPI(t *testing.T) *PublicMonitorAPI {
 	}
 
 	serviceContext := seele.ServiceContext{
-		DataDir: common.GetTempFolder() + "/n1/",
+		DataDir: filepath.Join(common.GetTempFolder(), "n1", fmt.Sprintf("%d", time.Now().UnixNano())),
 	}
 
 	ctx := context.WithValue(context.Background(), "ServiceContext", serviceContext)
 	dataDir := ctx.Value("ServiceContext").(seele.ServiceContext).DataDir
-	defer os.RemoveAll(dataDir)
 	log := log.GetLogger("seele")
 
 	seeleNode, err := node.New(&testConf)
 	if err != nil {
 		t.Fatal(err)
-		return nil
+		return
 	}
 
-	seeleService, err := seele.NewSeeleService(ctx, conf, log)
+	seeleService, err := seele.NewSeeleService(ctx, conf, log, factory.MustGetConsensusEngine(common.Sha256Algorithm), nil)
 	if err != nil {
 		t.Fatal(err)
-		return nil
+		return
 	}
 
 	monitorService, _ := NewMonitorService(seeleService, seeleNode, &testConf, log, "run test")
@@ -82,20 +86,23 @@ func createTestAPI(t *testing.T) *PublicMonitorAPI {
 	seeleNode.Register(monitorService)
 	seeleNode.Register(seeleService)
 
-	api := NewPublicMonitorAPI(monitorService)
+	api = NewPublicMonitorAPI(monitorService)
 
 	err = seeleNode.Start()
 	if err != nil {
 		t.Fatal(err)
-		return nil
+		return
 	}
 
 	seeleService.Miner().Start()
 
-	return api
+	return api, func() {
+		api.s.seele.Stop()
+		os.RemoveAll(dataDir)
+	}
 }
 
-func createTestAPIErr(errBranch int) *PublicMonitorAPI {
+func createTestAPIErr(errBranch int) (api *PublicMonitorAPI, dispose func()) {
 	conf := getTmpConfig()
 
 	testConf := node.Config{}
@@ -138,19 +145,18 @@ func createTestAPIErr(errBranch int) *PublicMonitorAPI {
 
 	ctx := context.WithValue(context.Background(), "ServiceContext", serviceContext)
 	dataDir := ctx.Value("ServiceContext").(seele.ServiceContext).DataDir
-	defer os.RemoveAll(dataDir)
 	log := log.GetLogger("seele")
 
 	seeleNode, err := node.New(&testConf)
 	if err != nil {
 		fmt.Println(err)
-		return nil
+		return
 	}
 
-	seeleService, err := seele.NewSeeleService(ctx, conf, log)
+	seeleService, err := seele.NewSeeleService(ctx, conf, log, factory.MustGetConsensusEngine(common.Sha256Algorithm), nil)
 	if err != nil {
 		fmt.Println(err)
-		return nil
+		return
 	}
 
 	monitorService, _ := NewMonitorService(seeleService, seeleNode, &testConf, log, "run test")
@@ -158,7 +164,7 @@ func createTestAPIErr(errBranch int) *PublicMonitorAPI {
 	seeleNode.Register(monitorService)
 	seeleNode.Register(seeleService)
 
-	api := NewPublicMonitorAPI(monitorService)
+	api = NewPublicMonitorAPI(monitorService)
 
 	if errBranch != 1 {
 		seeleNode.Start()
@@ -166,11 +172,15 @@ func createTestAPIErr(errBranch int) *PublicMonitorAPI {
 		seeleService.Miner().Start()
 	}
 
-	return api
+	return api, func() {
+		api.s.seele.Stop()
+		os.RemoveAll(dataDir)
+	}
 }
 
 func Test_PublicMonitorAPI_Allright(t *testing.T) {
-	api := createTestAPI(t)
+	api, dispose := createTestAPI(t)
+	defer dispose()
 	if api == nil {
 		t.Fatal("failed to create api")
 	}
@@ -186,10 +196,12 @@ func Test_PublicMonitorAPI_Allright(t *testing.T) {
 }
 
 func Test_PublicMonitorAPI_Err(t *testing.T) {
-	api := createTestAPIErr(1)
+	api, dispose := createTestAPIErr(1)
+	defer dispose()
 	if api == nil {
 		t.Fatal("failed to create api")
 	}
+
 	if _, err := api.NodeStats(); err == nil {
 		t.Fatalf("error branch is not covered")
 	}

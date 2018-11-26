@@ -29,7 +29,7 @@ type Protocol struct {
 	Length uint16
 
 	// AddPeer find a new peer will call this method
-	AddPeer func(peer *Peer, rw MsgReadWriter)
+	AddPeer func(peer *Peer, rw MsgReadWriter) bool
 
 	// DeletePeer this method will be called when a peer is disconnected
 	DeletePeer func(peer *Peer)
@@ -50,4 +50,12 @@ type Cap struct {
 
 func (cap Cap) String() string {
 	return fmt.Sprintf("%s/%d", cap.Name, cap.Version)
+}
+
+type capsByNameAndVersion []Cap
+
+func (cs capsByNameAndVersion) Len() int      { return len(cs) }
+func (cs capsByNameAndVersion) Swap(i, j int) { cs[i], cs[j] = cs[j], cs[i] }
+func (cs capsByNameAndVersion) Less(i, j int) bool {
+	return cs[i].Name < cs[j].Name || (cs[i].Name == cs[j].Name && cs[i].Version < cs[j].Version)
 }
